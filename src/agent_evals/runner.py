@@ -19,6 +19,7 @@ from .expectations import (
 )
 from .loader import EvaluationCase, EvaluationSuite, SuiteOptions
 from .provisioning import AgentPool
+from .reporting.trace import build_trace_url
 from .results import EvaluationResult, Sink, StepResult, UsageMetrics
 from .schemas.response import Response
 
@@ -391,11 +392,16 @@ def execute_case(
 
             trace_data = _fetch_trace(client, context_candidate)
 
+            trace_url = build_trace_url(
+                client.environment.trace_base_url, context_candidate
+            )
+
             results = evaluate_response(
                 step.expectations,
                 raw_response,
                 duration_seconds=step_duration,
                 trace=trace_data,
+                trace_url=trace_url,
             )
 
             # Threading is polymorphic: a step carries its taskId forward iff one

@@ -15,179 +15,119 @@ from .base import (
 _SPAN_KIND_ATTR = "openinference.span.kind"
 
 
-def _extract_span_kinds(trace: dict[str, Any] | None) -> set[str]:
-    """Collect every ``openinference.span.kind`` value across all spans."""
+def _iter_spans(trace: dict[str, Any] | None):
+    """Yield every span across all traces in the response."""
     if not trace:
-        return set()
-    kinds: set[str] = set()
+        return
     for item in trace.get("traces", []):
         for span in item.get("spans", []):
-            attrs = span.get("attributes") or {}
-            kind = attrs.get(_SPAN_KIND_ATTR)
-            if isinstance(kind, str):
-                kinds.add(kind)
-    return kinds
+            yield span
 
 
-class TraceSpanKinds(Expectation):
-    """Each listed OpenInference span kind must appear in the trace.
+def _build_span_index(
+    trace: dict[str, Any] | None
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Return (spans, id_to_span) from the trace."""
+    spans: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for span in _iter_spans(trace):
+        spans.append(span)
+        sid = span.get("span_id")
+        if sid:
+            by_id[sid] = span
+    return spans, by_id
+
+
+def _span_matches(span: dict[str, Any], matcher: dict[str, Any]) -> bool:
+    """Check whether *span* satisfies all fields of *matcher*."""
+    kind = matcher.get("kind")
+    if kind is not None:
+        attrs = span.get("attributes") or {}
+        if attrs.get(_SPAN_KIND_ATTR) != kind:
+            return False
+    name = matcher.get("name")
+    if name is not None and span.get("name") != name:
+        return False
+    attributes = matcher.get("attributes")
+    if attributes:
+        attrs = span.get("attributes") or {}
+        for key, expected in attributes.items():
+            if attrs.get(key) != expected:
+                return False
+    return True
+
+
+def _resolve_parent_chain(
+    span: dict[str, Any],
+    parent: dict[str, Any],
+    by_id: dict[str, dict[str, Any]],
+) -> bool:
+    """Check whether *span*'s parent satisfies the *parent* matcher."""
+    parent_id = span.get("parent_span_id")
+    if not parent_id:
+        return False
+    parent_span = by_id.get(parent_id)
+    if parent_span is None:
+        return False
+    if not _span_matches(parent_span, parent):
+        return False
+    grandparent = parent.get("parent")
+    if grandparent:
+        if not _resolve_parent_chain(parent_span, grandparent, by_id):
+            return False
+    return True
+
+
+class Trace(Expectation):
+    """Assert that the OpenInference trace contains spans matching a path.
+
+    Each entry is a span matcher: a dict that selects spans by ``kind``,
+    ``name``, and/or ``attributes``, with an optional ``min`` (default 1)
+    for the minimum number of matching spans, and an optional ``parent``
+    matcher that a matched span's parent must also satisfy.
 
     Example::
 
         expectations:
-          trace_span_kinds:
-            - CHAIN
-            - LLM
-    """
-
-    key = "trace_span_kinds"
-
-    def __init__(self, kinds: list[str]) -> None:
-        self.kinds = kinds
-
-    @classmethod
-    def parse(cls, raw: Any) -> "TraceSpanKinds":
-        return cls(list(raw or []))
-
-    def to_raw(self) -> Any:
-        return list(self.kinds)
-
-    def term_labels(self) -> list[str]:
-        return list(self.kinds)
-
-    def resolve(self, ctx: EvaluationContext) -> ExpectationResult:
-        present = _extract_span_kinds(ctx.trace)
-        if not present and ctx.trace is None:
-            return ExpectationResult(
-                self.key,
-                [
-                    _term_check(kind, False, "no trace available for this step")
-                    for kind in self.kinds
-                ],
-            )
-        checks = [
-            _term_check(
-                kind,
-                kind in present,
-                f"span kind {kind!r} not found in trace (present: {sorted(present) or 'none'})",
-            )
-            for kind in self.kinds
-        ]
-        return ExpectationResult(self.key, checks)
-
-
-def _count_span_kinds(trace: dict[str, Any] | None) -> dict[str, int]:
-    """Count spans per ``openinference.span.kind`` value."""
-    if not trace:
-        return {}
-    counts: dict[str, int] = {}
-    for item in trace.get("traces", []):
-        for span in item.get("spans", []):
-            attrs = span.get("attributes") or {}
-            kind = attrs.get(_SPAN_KIND_ATTR)
-            if isinstance(kind, str):
-                counts[kind] = counts.get(kind, 0) + 1
-    return counts
-
-
-class TraceSpanCounts(Expectation):
-    """The trace must contain exactly the specified count of each span kind.
-
-    Example::
-
-        expectations:
-          trace_span_counts:
-            LLM: 1
-            TOOL: 1
-    """
-
-    key = "trace_span_counts"
-
-    def __init__(self, counts: dict[str, int]) -> None:
-        self.counts = counts
-
-    @classmethod
-    def parse(cls, raw: Any) -> "TraceSpanCounts":
-        return cls({k: int(v) for k, v in (raw or {}).items()})
-
-    def to_raw(self) -> Any:
-        return dict(self.counts)
-
-    def term_labels(self) -> list[str]:
-        return list(self.counts)
-
-    def resolve(self, ctx: EvaluationContext) -> ExpectationResult:
-        actual = _count_span_kinds(ctx.trace)
-        if not actual and ctx.trace is None:
-            return ExpectationResult(
-                self.key,
-                [
-                    _term_check(kind, False, "no trace available for this step")
-                    for kind in self.counts
-                ],
-            )
-        checks = [
-            _term_check(
-                kind,
-                actual.get(kind, 0) == expected,
-                f"expected {expected} {kind!r} span(s), found {actual.get(kind, 0)} "
-                f"(actual: {dict(sorted(actual.items())) or 'none'})",
-            )
-            for kind, expected in self.counts.items()
-        ]
-        return ExpectationResult(self.key, checks)
-
-
-def _spans_of_kind(trace: dict[str, Any] | None, kind: str) -> list[dict[str, Any]]:
-    """Return every span whose ``openinference.span.kind`` equals *kind*."""
-    if not trace:
-        return []
-    result: list[dict[str, Any]] = []
-    for item in trace.get("traces", []):
-        for span in item.get("spans", []):
-            attrs = span.get("attributes") or {}
-            if attrs.get(_SPAN_KIND_ATTR) == kind:
-                result.append(span)
-    return result
-
-
-class TraceSpanAttributes(Expectation):
-    """Assert that at least one span of each given kind has matching attributes.
-
-    Each entry is a dict with a ``kind`` key to select spans, plus
-    attribute key-value pairs to check. The pseudo-key ``name`` checks the
-    span's top-level ``name`` field rather than an attribute.
-
-    Example::
-
-        expectations:
-          trace_span_attributes:
+          trace:
+            - kind: CHAIN
+              attributes:
+                opik.metadata.final_state: TASK_STATE_COMPLETED
             - kind: LLM
-              llm.finish_reason: tool_calls
+              attributes:
+                llm.finish_reason: tool_calls
             - kind: TOOL
               name: complete_tool
+              min: 1
+            - kind: LLM
+              parent:
+                kind: CHAIN
     """
 
-    key = "trace_span_attributes"
+    key = "trace"
 
-    def __init__(self, entries: list[dict[str, Any]]) -> None:
-        self.entries = entries
+    def __init__(self, matchers: list[dict[str, Any]]) -> None:
+        self.matchers = matchers
 
     @classmethod
-    def parse(cls, raw: Any) -> "TraceSpanAttributes":
+    def parse(cls, raw: Any) -> "Trace":
         return cls(list(raw or []))
 
     def to_raw(self) -> Any:
-        return list(self.entries)
+        return list(self.matchers)
 
     def term_labels(self) -> list[str]:
         labels: list[str] = []
-        for entry in self.entries:
-            kind = entry.get("kind", "?")
-            for key in entry:
-                if key == "kind":
-                    continue
-                labels.append(f"{kind}.{key}")
+        for i, m in enumerate(self.matchers):
+            kind = m.get("kind", "?")
+            name = m.get("name")
+            label = kind if not name else f"{kind}:{name}"
+            if "min" in m and m["min"] != 1:
+                label = f"{label}(min={m['min']})"
+            if "parent" in m:
+                pkind = m["parent"].get("kind", "?")
+                label = f"{label}<-{pkind}"
+            labels.append(label)
         return labels
 
     def resolve(self, ctx: EvaluationContext) -> ExpectationResult:
@@ -199,27 +139,29 @@ class TraceSpanAttributes(Expectation):
                     for label in self.term_labels()
                 ],
             )
+        spans, by_id = _build_span_index(ctx.trace)
         checks: list[CheckResult] = []
-        for entry in self.entries:
-            kind = entry.get("kind", "")
-            spans = _spans_of_kind(ctx.trace, kind)
-            attr_checks = {k: v for k, v in entry.items() if k != "kind"}
-            for attr_key, expected_val in attr_checks.items():
-                label = f"{kind}.{attr_key}"
-                found = False
-                for span in spans:
-                    if attr_key == "name":
-                        actual = span.get("name")
-                    else:
-                        actual = (span.get("attributes") or {}).get(attr_key)
-                    if actual == expected_val:
-                        found = True
-                        break
+        for i, matcher in enumerate(self.matchers):
+            min_count = matcher.get("min", 1)
+            parent = matcher.get("parent")
+            matched = 0
+            for span in spans:
+                if not _span_matches(span, matcher):
+                    continue
+                if parent and not _resolve_parent_chain(span, parent, by_id):
+                    continue
+                matched += 1
+            label = self.term_labels()[i]
+            passed = matched >= min_count
+            if passed:
+                detail = f"found {matched} matching span(s)"
+            else:
+                kind = matcher.get("kind", "any")
                 detail = (
-                    "passed"
-                    if found
-                    else f"no {kind!r} span with {attr_key}={expected_val!r} "
-                    f"(checked {len(spans)} span(s))"
+                    f"expected at least {min_count} {kind!r} span(s) matching; "
+                    f"found {matched}"
                 )
-                checks.append(_term_check(label, found, detail))
+                if ctx.trace_url:
+                    detail += f" — {ctx.trace_url}"
+            checks.append(_term_check(label, passed, detail))
         return ExpectationResult(self.key, checks)

@@ -161,6 +161,7 @@ class EvaluationContext:
     task_state: str | None  # raw terminal state string — expected_state
     duration_seconds: float | None
     trace: dict[str, Any] | None = None  # OpenInference trace JSON — trace expectations
+    trace_url: str | None = None  # Opik trace URL — included in trace failure details
 
     @classmethod
     def from_response(
@@ -169,6 +170,7 @@ class EvaluationContext:
         *,
         duration_seconds: float | None = None,
         trace: dict[str, Any] | None = None,
+        trace_url: str | None = None,
     ) -> "EvaluationContext":
         return cls(
             haystack=extract_textual_response(response),
@@ -177,6 +179,7 @@ class EvaluationContext:
             task_state=Response.from_dict(response).state,
             duration_seconds=duration_seconds,
             trace=trace,
+            trace_url=trace_url,
         )
 
 
@@ -326,6 +329,7 @@ def evaluate_response(
     *,
     duration_seconds: float | None = None,
     trace: dict[str, Any] | None = None,
+    trace_url: str | None = None,
 ) -> list[ExpectationResult]:
     """Resolve *expectations* against *response* into per-term results.
 
@@ -335,6 +339,9 @@ def evaluate_response(
     a miss exists only as its failed check within it.
     """
     ctx = EvaluationContext.from_response(
-        response, duration_seconds=duration_seconds, trace=trace
+        response,
+        duration_seconds=duration_seconds,
+        trace=trace,
+        trace_url=trace_url,
     )
     return resolve_all(expectations, ctx)

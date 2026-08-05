@@ -26,9 +26,13 @@ def _ctx(
     *,
     duration_seconds: float | None = None,
     trace: dict | None = None,
+    trace_url: str | None = None,
 ) -> EvaluationContext:
     return EvaluationContext.from_response(
-        response, duration_seconds=duration_seconds, trace=trace
+        response,
+        duration_seconds=duration_seconds,
+        trace=trace,
+        trace_url=trace_url,
     )
 
 
@@ -59,7 +63,7 @@ def _state_response(state: str, text: str = "ok") -> dict:
 # --- Registry: every declared type is discoverable in one place -------------
 
 
-def test_registry_lists_all_thirteen_types():
+def test_registry_lists_all_eleven_types():
     assert set(exp.registry()) == {
         "must_include",
         "must_not_include",
@@ -71,9 +75,7 @@ def test_registry_lists_all_thirteen_types():
         "cited_pubmed_ids",
         "faithful_to_source",
         "expected_state",
-        "trace_span_kinds",
-        "trace_span_counts",
-        "trace_span_attributes",
+        "trace",
     }
 
 
@@ -316,217 +318,228 @@ def test_non_state_expectations_never_continue_task():
     assert Judge.parse("ref").continues_task() is False
 
 
-# --- trace_span_kinds / trace_span_counts ------------------------------------
+# --- trace: span matchers ----------------------------------------------------
 
 
-def _trace(*span_kinds: str) -> dict:
-    """Build a minimal trace with one span per given kind."""
-    spans = [
-        {"attributes": {"openinference.span.kind": kind}, "span_id": f"span-{i}"}
-        for i, kind in enumerate(span_kinds)
-    ]
-    return {"traces": [{"spans": spans}]}
+def _span(kind: str, name: str = "", span_id: str = "", parent_id: str | None = None, **attrs):
+    """Build a minimal span dict."""
+    attributes = {"openinference.span.kind": kind, **attrs}
+    span: dict = {"attributes": attributes, "span_id": span_id, "name": name}
+    if parent_id is not None:
+        span["parent_span_id"] = parent_id
+    return span
 
 
-def test_trace_span_kinds_all_present():
+def _trace_of(*spans) -> dict:
+    """Build a trace response from spans."""
+    return {"traces": [{"spans": list(spans)}]}
+
+
+def test_trace_kind_match():
     results = _resolve(
-        {"trace_span_kinds": ["LLM", "TOOL"]},
+        {"trace": [{"kind": "LLM"}]},
         _text_response("ok"),
-        trace=_trace("LLM", "TOOL"),
+        trace=_trace_of(_span("LLM", span_id="s1")),
     )
-    assert results["trace_span_kinds"].passed
+    assert results["trace"].passed
 
 
-def test_trace_span_kinds_missing_kind_fails():
+def test_trace_kind_no_match():
     results = _resolve(
-        {"trace_span_kinds": ["CHAIN", "LLM"]},
+        {"trace": [{"kind": "CHAIN"}]},
         _text_response("ok"),
-        trace=_trace("LLM"),
+        trace=_trace_of(_span("LLM", span_id="s1")),
     )
-    assert not results["trace_span_kinds"].passed
-    checks = results["trace_span_kinds"].checks
-    assert [(c.label, c.passed) for c in checks] == [("CHAIN", False), ("LLM", True)]
+    assert not results["trace"].passed
 
 
-def test_trace_span_kinds_no_trace_fails_all():
+def test_trace_name_match():
     results = _resolve(
-        {"trace_span_kinds": ["LLM"]}, _text_response("ok"), trace=None
-    )
-    assert not results["trace_span_kinds"].passed
-    assert results["trace_span_kinds"].checks[0].detail == "no trace available for this step"
-
-
-def test_trace_span_counts_exact_match():
-    results = _resolve(
-        {"trace_span_counts": {"LLM": 1, "TOOL": 1}},
+        {"trace": [{"kind": "TOOL", "name": "complete_tool"}]},
         _text_response("ok"),
-        trace=_trace("LLM", "TOOL"),
+        trace=_trace_of(_span("TOOL", name="complete_tool", span_id="s1")),
     )
-    assert results["trace_span_counts"].passed
+    assert results["trace"].passed
 
 
-def test_trace_span_counts_too_many_spans_fails():
+def test_trace_name_wrong_fails():
     results = _resolve(
-        {"trace_span_counts": {"LLM": 1, "TOOL": 1}},
+        {"trace": [{"kind": "TOOL", "name": "complete_tool"}]},
         _text_response("ok"),
-        trace=_trace("LLM", "TOOL", "TOOL", "TOOL"),
+        trace=_trace_of(_span("TOOL", name="other_tool", span_id="s1")),
     )
-    assert not results["trace_span_counts"].passed
-    checks = results["trace_span_counts"].checks
-    assert [(c.label, c.passed) for c in checks] == [("LLM", True), ("TOOL", False)]
+    assert not results["trace"].passed
 
 
-def test_trace_span_counts_missing_kind_fails():
+def test_trace_attributes_match():
     results = _resolve(
-        {"trace_span_counts": {"LLM": 1, "CHAIN": 1}},
+        {"trace": [{"kind": "LLM", "attributes": {"llm.finish_reason": "tool_calls"}}]},
         _text_response("ok"),
-        trace=_trace("LLM"),
+        trace=_trace_of(_span("LLM", span_id="s1", **{"llm.finish_reason": "tool_calls"})),
     )
-    assert not results["trace_span_counts"].passed
-    checks = results["trace_span_counts"].checks
-    assert [(c.label, c.passed) for c in checks] == [("LLM", True), ("CHAIN", False)]
+    assert results["trace"].passed
 
 
-def test_trace_span_counts_no_trace_fails_all():
+def test_trace_attributes_wrong_value_fails():
     results = _resolve(
-        {"trace_span_counts": {"LLM": 1}}, _text_response("ok"), trace=None
+        {"trace": [{"kind": "LLM", "attributes": {"llm.finish_reason": "tool_calls"}}]},
+        _text_response("ok"),
+        trace=_trace_of(_span("LLM", span_id="s1", **{"llm.finish_reason": "length"})),
     )
-    assert not results["trace_span_counts"].passed
-    assert results["trace_span_counts"].checks[0].detail == "no trace available for this step"
+    assert not results["trace"].passed
 
 
-def test_trace_span_attributes_match():
-    trace = {
-        "traces": [
-            {
-                "spans": [
-                    {
-                        "attributes": {
-                            "openinference.span.kind": "LLM",
-                            "llm.finish_reason": "tool_calls",
-                        },
-                        "name": "some-model",
-                        "span_id": "s1",
-                    },
-                    {
-                        "attributes": {"openinference.span.kind": "TOOL"},
-                        "name": "complete_tool",
-                        "span_id": "s2",
-                    },
-                ]
-            }
-        ]
-    }
+def test_trace_multiple_matchers_all_pass():
+    trace = _trace_of(
+        _span("CHAIN", span_id="root", **{"opik.metadata.final_state": "TASK_STATE_COMPLETED"}),
+        _span("CHAIN", span_id="run", parent_id="root"),
+        _span("LLM", span_id="llm", parent_id="run", **{"llm.finish_reason": "tool_calls"}),
+        _span("TOOL", name="complete_tool", span_id="tool", parent_id="run"),
+    )
     results = _resolve(
         {
-            "trace_span_attributes": [
-                {"kind": "LLM", "llm.finish_reason": "tool_calls"},
+            "trace": [
+                {"kind": "CHAIN", "attributes": {"opik.metadata.final_state": "TASK_STATE_COMPLETED"}},
+                {"kind": "LLM", "attributes": {"llm.finish_reason": "tool_calls"}},
                 {"kind": "TOOL", "name": "complete_tool"},
             ]
         },
         _text_response("ok"),
         trace=trace,
     )
-    assert results["trace_span_attributes"].passed
+    assert results["trace"].passed
+    assert len(results["trace"].checks) == 3
 
 
-def test_trace_span_attributes_wrong_value_fails():
-    trace = {
-        "traces": [
-            {
-                "spans": [
-                    {
-                        "attributes": {
-                            "openinference.span.kind": "LLM",
-                            "llm.finish_reason": "length",
-                        },
-                        "name": "some-model",
-                        "span_id": "s1",
-                    },
-                ]
-            }
-        ]
-    }
+def test_trace_multiple_matchers_partial_fail():
+    trace = _trace_of(_span("LLM", span_id="s1"))
     results = _resolve(
-        {"trace_span_attributes": [{"kind": "LLM", "llm.finish_reason": "tool_calls"}]},
+        {
+            "trace": [
+                {"kind": "LLM"},
+                {"kind": "CHAIN"},
+            ]
+        },
         _text_response("ok"),
         trace=trace,
     )
-    assert not results["trace_span_attributes"].passed
-    assert results["trace_span_attributes"].checks[0].label == "LLM.llm.finish_reason"
+    assert not results["trace"].passed
+    checks = results["trace"].checks
+    assert [(c.label, c.passed) for c in checks] == [("LLM", True), ("CHAIN", False)]
 
 
-def test_trace_span_attributes_no_spans_of_kind_fails():
+def test_trace_no_trace_fails_all():
     results = _resolve(
-        {"trace_span_attributes": [{"kind": "CHAIN", "name": "agent"}]},
-        _text_response("ok"),
-        trace=_trace("LLM"),
-    )
-    assert not results["trace_span_attributes"].passed
-
-
-def test_trace_span_attributes_no_trace_fails_all():
-    results = _resolve(
-        {"trace_span_attributes": [{"kind": "LLM", "llm.finish_reason": "tool_calls"}]},
+        {"trace": [{"kind": "LLM"}]},
         _text_response("ok"),
         trace=None,
     )
-    assert not results["trace_span_attributes"].passed
-    assert results["trace_span_attributes"].checks[0].detail == "no trace available for this step"
+    assert not results["trace"].passed
+    assert results["trace"].checks[0].detail == "no trace available for this step"
 
 
-def test_trace_span_attributes_name_checks_span_name_field():
-    trace = {
-        "traces": [
-            {
-                "spans": [
-                    {
-                        "attributes": {"openinference.span.kind": "TOOL"},
-                        "name": "complete_tool",
-                        "span_id": "s1",
-                    },
-                ]
-            }
-        ]
-    }
+def test_trace_min_count():
+    trace = _trace_of(
+        _span("CHAIN", span_id="root"),
+        _span("CHAIN", span_id="run", parent_id="root"),
+    )
     results = _resolve(
-        {"trace_span_attributes": [{"kind": "TOOL", "name": "complete_tool"}]},
+        {"trace": [{"kind": "CHAIN", "min": 2}]},
         _text_response("ok"),
         trace=trace,
     )
-    assert results["trace_span_attributes"].passed
+    assert results["trace"].passed
 
 
-def test_trace_span_attributes_multiple_attrs_one_entry():
-    trace = {
-        "traces": [
-            {
-                "spans": [
-                    {
-                        "attributes": {
-                            "openinference.span.kind": "LLM",
-                            "llm.finish_reason": "tool_calls",
-                            "llm.model_name": "gpt-5.4",
-                        },
-                        "name": "gpt-5.4",
-                        "span_id": "s1",
-                    },
-                ]
-            }
-        ]
-    }
+def test_trace_min_not_met_fails():
+    trace = _trace_of(_span("CHAIN", span_id="root"))
+    results = _resolve(
+        {"trace": [{"kind": "CHAIN", "min": 2}]},
+        _text_response("ok"),
+        trace=trace,
+    )
+    assert not results["trace"].passed
+
+
+def test_trace_parent_match():
+    trace = _trace_of(
+        _span("CHAIN", span_id="root"),
+        _span("LLM", span_id="llm", parent_id="root"),
+    )
+    results = _resolve(
+        {"trace": [{"kind": "LLM", "parent": {"kind": "CHAIN"}}]},
+        _text_response("ok"),
+        trace=trace,
+    )
+    assert results["trace"].passed
+
+
+def test_trace_parent_no_match():
+    trace = _trace_of(
+        _span("TOOL", span_id="tool"),
+        _span("LLM", span_id="llm", parent_id="tool"),
+    )
+    results = _resolve(
+        {"trace": [{"kind": "LLM", "parent": {"kind": "CHAIN"}}]},
+        _text_response("ok"),
+        trace=trace,
+    )
+    assert not results["trace"].passed
+
+
+def test_trace_parent_no_parent_fails():
+    trace = _trace_of(_span("LLM", span_id="llm"))
+    results = _resolve(
+        {"trace": [{"kind": "LLM", "parent": {"kind": "CHAIN"}}]},
+        _text_response("ok"),
+        trace=trace,
+    )
+    assert not results["trace"].passed
+
+
+def test_trace_nested_parent_chain():
+    trace = _trace_of(
+        _span("CHAIN", span_id="root"),
+        _span("CHAIN", span_id="run", parent_id="root"),
+        _span("LLM", span_id="llm", parent_id="run"),
+    )
+    results = _resolve(
+        {"trace": [{"kind": "LLM", "parent": {"kind": "CHAIN", "parent": {"kind": "CHAIN"}}}]},
+        _text_response("ok"),
+        trace=trace,
+    )
+    assert results["trace"].passed
+
+
+def test_trace_trace_url_in_failure_detail():
+    results = _resolve(
+        {"trace": [{"kind": "CHAIN"}]},
+        _text_response("ok"),
+        trace=_trace_of(_span("LLM", span_id="s1")),
+        trace_url="https://opik.dev-weu.corti.app/default/projects/abc/logs?thread=ctx-1",
+    )
+    assert not results["trace"].passed
+    assert "https://opik.dev-weu.corti.app" in results["trace"].checks[0].detail
+
+
+def test_trace_combined_kind_name_attributes():
+    trace = _trace_of(
+        _span("LLM", name="gpt-5.4", span_id="s1", **{"llm.finish_reason": "tool_calls", "llm.model_name": "gpt-5.4"}),
+    )
     results = _resolve(
         {
-            "trace_span_attributes": [
+            "trace": [
                 {
                     "kind": "LLM",
-                    "llm.finish_reason": "tool_calls",
-                    "llm.model_name": "gpt-5.4",
+                    "name": "gpt-5.4",
+                    "attributes": {
+                        "llm.finish_reason": "tool_calls",
+                        "llm.model_name": "gpt-5.4",
+                    },
                 }
             ]
         },
         _text_response("ok"),
         trace=trace,
     )
-    assert results["trace_span_attributes"].passed
-    assert len(results["trace_span_attributes"].checks) == 2
+    assert results["trace"].passed
