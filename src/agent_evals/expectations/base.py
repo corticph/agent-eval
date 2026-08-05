@@ -160,6 +160,7 @@ class EvaluationContext:
     response: dict[str, Any] | None  # parsed response tree — jsonpath / json checks
     task_state: str | None  # raw terminal state string — expected_state
     duration_seconds: float | None
+    trace: dict[str, Any] | None = None  # OpenInference trace JSON — trace expectations
 
     @classmethod
     def from_response(
@@ -167,6 +168,7 @@ class EvaluationContext:
         response: dict[str, Any] | None,
         *,
         duration_seconds: float | None = None,
+        trace: dict[str, Any] | None = None,
     ) -> "EvaluationContext":
         return cls(
             haystack=extract_textual_response(response),
@@ -174,6 +176,7 @@ class EvaluationContext:
             response=response,
             task_state=Response.from_dict(response).state,
             duration_seconds=duration_seconds,
+            trace=trace,
         )
 
 
@@ -322,6 +325,7 @@ def evaluate_response(
     response: dict[str, Any] | None,
     *,
     duration_seconds: float | None = None,
+    trace: dict[str, Any] | None = None,
 ) -> list[ExpectationResult]:
     """Resolve *expectations* against *response* into per-term results.
 
@@ -330,5 +334,7 @@ def evaluate_response(
     order. The returned list is the single per-term truth both sinks render from;
     a miss exists only as its failed check within it.
     """
-    ctx = EvaluationContext.from_response(response, duration_seconds=duration_seconds)
+    ctx = EvaluationContext.from_response(
+        response, duration_seconds=duration_seconds, trace=trace
+    )
     return resolve_all(expectations, ctx)

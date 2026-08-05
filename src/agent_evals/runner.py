@@ -7,7 +7,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from .client import AgentClient
 from .errors import ErrorCode, EvalError
@@ -283,6 +283,41 @@ def _fold_missing_task_id(results: list[ExpectationResult], detail: str) -> None
             return
 
 
+_TRACE_RETRIES = 10
+_TRACE_RETRY_DELAY = 2.0
+
+
+def _fetch_trace(
+    client: AgentClient, context_id: str | None
+) -> dict[str, Any] | None:
+    """Fetch the OpenInference trace for *context_id*, retrying on empty results.
+
+    The DB span exporter batches asynchronously, so spans may not be visible
+    immediately after a response. Returns ``None`` if no context id is
+    available or the trace never appears within the retry budget.
+    """
+    if not context_id:
+        return None
+    for attempt in range(_TRACE_RETRIES):
+        try:
+            trace = client.get_trace(context_id)
+            if trace.get("traces"):
+                return trace
+        except Exception:
+            _LOGGER.debug(
+                "trace fetch attempt %d failed for context %s",
+                attempt + 1,
+                context_id,
+                exc_info=True,
+            )
+        if attempt < _TRACE_RETRIES - 1:
+            time.sleep(_TRACE_RETRY_DELAY)
+    _LOGGER.warning(
+        "no trace available for context %s after %d attempts", context_id, _TRACE_RETRIES
+    )
+    return None
+
+
 def execute_case(
     case: EvaluationCase,
     client: AgentClient,
@@ -326,13 +361,19 @@ def execute_case(
             raw_response = client.send_message(agent_id, request.to_dict())
             response = Response.from_dict(raw_response)
             step_duration = time.perf_counter() - step_start
-            results = evaluate_response(
-                step.expectations, raw_response, duration_seconds=step_duration
-            )
 
             context_candidate = response.resolved_context_id()
             if context_candidate:
                 current_context_id = context_candidate
+
+            trace_data = _fetch_trace(client, context_candidate)
+
+            results = evaluate_response(
+                step.expectations,
+                raw_response,
+                duration_seconds=step_duration,
+                trace=trace_data,
+            )
 
             # Threading is polymorphic: a step carries its taskId forward iff one
             # of its expectations says so (only ``expected_state: input-required``

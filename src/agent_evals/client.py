@@ -147,6 +147,16 @@ class AgentClient:
             timeout=timeout,
         )
 
+    def get_trace(
+        self,
+        context_id: str,
+        *,
+        timeout: float | tuple[float, float] | None = _DEFAULT_TIMEOUT,
+    ) -> dict[str, Any]:
+        """Fetch the OpenInference trace for a context (GET /v2/agentic/contexts/{id}/trace)."""
+        path = f"/v2/agentic/contexts/{context_id}/trace"
+        return self._request("GET", path, timeout=timeout)
+
     def close(self) -> None:
         """Release underlying HTTP resources."""
         self.session.close()

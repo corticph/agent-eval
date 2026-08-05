@@ -22,9 +22,14 @@ from agent_evals.expectations import (
 
 
 def _ctx(
-    response: dict | None = None, *, duration_seconds: float | None = None
+    response: dict | None = None,
+    *,
+    duration_seconds: float | None = None,
+    trace: dict | None = None,
 ) -> EvaluationContext:
-    return EvaluationContext.from_response(response, duration_seconds=duration_seconds)
+    return EvaluationContext.from_response(
+        response, duration_seconds=duration_seconds, trace=trace
+    )
 
 
 def _resolve(block: dict | None, response: dict | None = None, **ctx_kw):
@@ -54,7 +59,7 @@ def _state_response(state: str, text: str = "ok") -> dict:
 # --- Registry: every declared type is discoverable in one place -------------
 
 
-def test_registry_lists_all_ten_types():
+def test_registry_lists_all_thirteen_types():
     assert set(exp.registry()) == {
         "must_include",
         "must_not_include",
@@ -66,6 +71,9 @@ def test_registry_lists_all_ten_types():
         "cited_pubmed_ids",
         "faithful_to_source",
         "expected_state",
+        "trace_span_kinds",
+        "trace_span_counts",
+        "trace_span_attributes",
     }
 
 
@@ -306,3 +314,219 @@ def test_continues_task_true_only_for_input_required():
 
 def test_non_state_expectations_never_continue_task():
     assert Judge.parse("ref").continues_task() is False
+
+
+# --- trace_span_kinds / trace_span_counts ------------------------------------
+
+
+def _trace(*span_kinds: str) -> dict:
+    """Build a minimal trace with one span per given kind."""
+    spans = [
+        {"attributes": {"openinference.span.kind": kind}, "span_id": f"span-{i}"}
+        for i, kind in enumerate(span_kinds)
+    ]
+    return {"traces": [{"spans": spans}]}
+
+
+def test_trace_span_kinds_all_present():
+    results = _resolve(
+        {"trace_span_kinds": ["LLM", "TOOL"]},
+        _text_response("ok"),
+        trace=_trace("LLM", "TOOL"),
+    )
+    assert results["trace_span_kinds"].passed
+
+
+def test_trace_span_kinds_missing_kind_fails():
+    results = _resolve(
+        {"trace_span_kinds": ["CHAIN", "LLM"]},
+        _text_response("ok"),
+        trace=_trace("LLM"),
+    )
+    assert not results["trace_span_kinds"].passed
+    checks = results["trace_span_kinds"].checks
+    assert [(c.label, c.passed) for c in checks] == [("CHAIN", False), ("LLM", True)]
+
+
+def test_trace_span_kinds_no_trace_fails_all():
+    results = _resolve(
+        {"trace_span_kinds": ["LLM"]}, _text_response("ok"), trace=None
+    )
+    assert not results["trace_span_kinds"].passed
+    assert results["trace_span_kinds"].checks[0].detail == "no trace available for this step"
+
+
+def test_trace_span_counts_exact_match():
+    results = _resolve(
+        {"trace_span_counts": {"LLM": 1, "TOOL": 1}},
+        _text_response("ok"),
+        trace=_trace("LLM", "TOOL"),
+    )
+    assert results["trace_span_counts"].passed
+
+
+def test_trace_span_counts_too_many_spans_fails():
+    results = _resolve(
+        {"trace_span_counts": {"LLM": 1, "TOOL": 1}},
+        _text_response("ok"),
+        trace=_trace("LLM", "TOOL", "TOOL", "TOOL"),
+    )
+    assert not results["trace_span_counts"].passed
+    checks = results["trace_span_counts"].checks
+    assert [(c.label, c.passed) for c in checks] == [("LLM", True), ("TOOL", False)]
+
+
+def test_trace_span_counts_missing_kind_fails():
+    results = _resolve(
+        {"trace_span_counts": {"LLM": 1, "CHAIN": 1}},
+        _text_response("ok"),
+        trace=_trace("LLM"),
+    )
+    assert not results["trace_span_counts"].passed
+    checks = results["trace_span_counts"].checks
+    assert [(c.label, c.passed) for c in checks] == [("LLM", True), ("CHAIN", False)]
+
+
+def test_trace_span_counts_no_trace_fails_all():
+    results = _resolve(
+        {"trace_span_counts": {"LLM": 1}}, _text_response("ok"), trace=None
+    )
+    assert not results["trace_span_counts"].passed
+    assert results["trace_span_counts"].checks[0].detail == "no trace available for this step"
+
+
+def test_trace_span_attributes_match():
+    trace = {
+        "traces": [
+            {
+                "spans": [
+                    {
+                        "attributes": {
+                            "openinference.span.kind": "LLM",
+                            "llm.finish_reason": "tool_calls",
+                        },
+                        "name": "some-model",
+                        "span_id": "s1",
+                    },
+                    {
+                        "attributes": {"openinference.span.kind": "TOOL"},
+                        "name": "complete_tool",
+                        "span_id": "s2",
+                    },
+                ]
+            }
+        ]
+    }
+    results = _resolve(
+        {
+            "trace_span_attributes": [
+                {"kind": "LLM", "llm.finish_reason": "tool_calls"},
+                {"kind": "TOOL", "name": "complete_tool"},
+            ]
+        },
+        _text_response("ok"),
+        trace=trace,
+    )
+    assert results["trace_span_attributes"].passed
+
+
+def test_trace_span_attributes_wrong_value_fails():
+    trace = {
+        "traces": [
+            {
+                "spans": [
+                    {
+                        "attributes": {
+                            "openinference.span.kind": "LLM",
+                            "llm.finish_reason": "length",
+                        },
+                        "name": "some-model",
+                        "span_id": "s1",
+                    },
+                ]
+            }
+        ]
+    }
+    results = _resolve(
+        {"trace_span_attributes": [{"kind": "LLM", "llm.finish_reason": "tool_calls"}]},
+        _text_response("ok"),
+        trace=trace,
+    )
+    assert not results["trace_span_attributes"].passed
+    assert results["trace_span_attributes"].checks[0].label == "LLM.llm.finish_reason"
+
+
+def test_trace_span_attributes_no_spans_of_kind_fails():
+    results = _resolve(
+        {"trace_span_attributes": [{"kind": "CHAIN", "name": "agent"}]},
+        _text_response("ok"),
+        trace=_trace("LLM"),
+    )
+    assert not results["trace_span_attributes"].passed
+
+
+def test_trace_span_attributes_no_trace_fails_all():
+    results = _resolve(
+        {"trace_span_attributes": [{"kind": "LLM", "llm.finish_reason": "tool_calls"}]},
+        _text_response("ok"),
+        trace=None,
+    )
+    assert not results["trace_span_attributes"].passed
+    assert results["trace_span_attributes"].checks[0].detail == "no trace available for this step"
+
+
+def test_trace_span_attributes_name_checks_span_name_field():
+    trace = {
+        "traces": [
+            {
+                "spans": [
+                    {
+                        "attributes": {"openinference.span.kind": "TOOL"},
+                        "name": "complete_tool",
+                        "span_id": "s1",
+                    },
+                ]
+            }
+        ]
+    }
+    results = _resolve(
+        {"trace_span_attributes": [{"kind": "TOOL", "name": "complete_tool"}]},
+        _text_response("ok"),
+        trace=trace,
+    )
+    assert results["trace_span_attributes"].passed
+
+
+def test_trace_span_attributes_multiple_attrs_one_entry():
+    trace = {
+        "traces": [
+            {
+                "spans": [
+                    {
+                        "attributes": {
+                            "openinference.span.kind": "LLM",
+                            "llm.finish_reason": "tool_calls",
+                            "llm.model_name": "gpt-5.4",
+                        },
+                        "name": "gpt-5.4",
+                        "span_id": "s1",
+                    },
+                ]
+            }
+        ]
+    }
+    results = _resolve(
+        {
+            "trace_span_attributes": [
+                {
+                    "kind": "LLM",
+                    "llm.finish_reason": "tool_calls",
+                    "llm.model_name": "gpt-5.4",
+                }
+            ]
+        },
+        _text_response("ok"),
+        trace=trace,
+    )
+    assert results["trace_span_attributes"].passed
+    assert len(results["trace_span_attributes"].checks) == 2
