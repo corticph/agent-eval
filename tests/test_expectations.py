@@ -438,23 +438,36 @@ def test_trace_no_trace_fails_all():
     assert results["trace"].checks[0].detail == "no trace available for this step"
 
 
-def test_trace_min_count():
+def test_trace_exact_count_match():
     trace = _trace_of(
         _span("CHAIN", span_id="root"),
         _span("CHAIN", span_id="run", parent_id="root"),
     )
     results = _resolve(
-        {"trace": [{"kind": "CHAIN", "min": 2}]},
+        {"trace": [{"kind": "CHAIN", "exact": 2}]},
         _text_response("ok"),
         trace=trace,
     )
     assert results["trace"].passed
 
 
-def test_trace_min_not_met_fails():
+def test_trace_exact_count_too_many_fails():
+    trace = _trace_of(
+        _span("CHAIN", span_id="root"),
+        _span("CHAIN", span_id="run", parent_id="root"),
+    )
+    results = _resolve(
+        {"trace": [{"kind": "CHAIN", "exact": 1}]},
+        _text_response("ok"),
+        trace=trace,
+    )
+    assert not results["trace"].passed
+
+
+def test_trace_exact_count_not_met_fails():
     trace = _trace_of(_span("CHAIN", span_id="root"))
     results = _resolve(
-        {"trace": [{"kind": "CHAIN", "min": 2}]},
+        {"trace": [{"kind": "CHAIN", "exact": 2}]},
         _text_response("ok"),
         trace=trace,
     )

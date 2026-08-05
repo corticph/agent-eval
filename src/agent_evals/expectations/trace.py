@@ -82,8 +82,8 @@ class Trace(Expectation):
     """Assert that the OpenInference trace contains spans matching a path.
 
     Each entry is a span matcher: a dict that selects spans by ``kind``,
-    ``name``, and/or ``attributes``, with an optional ``min`` (default 1)
-    for the minimum number of matching spans, and an optional ``parent``
+    ``name``, and/or ``attributes``, with an optional ``exact`` count for the
+    expected number of matching spans (default 1), and an optional ``parent``
     matcher that a matched span's parent must also satisfy.
 
     Example::
@@ -93,12 +93,12 @@ class Trace(Expectation):
             - kind: CHAIN
               attributes:
                 opik.metadata.final_state: TASK_STATE_COMPLETED
+              exact: 2
             - kind: LLM
               attributes:
                 llm.finish_reason: tool_calls
             - kind: TOOL
               name: complete_tool
-              min: 1
             - kind: LLM
               parent:
                 kind: CHAIN
@@ -122,8 +122,8 @@ class Trace(Expectation):
             kind = m.get("kind", "?")
             name = m.get("name")
             label = kind if not name else f"{kind}:{name}"
-            if "min" in m and m["min"] != 1:
-                label = f"{label}(min={m['min']})"
+            if "exact" in m and m["exact"] != 1:
+                label = f"{label}(exact={m['exact']})"
             if "parent" in m:
                 pkind = m["parent"].get("kind", "?")
                 label = f"{label}<-{pkind}"
@@ -142,7 +142,7 @@ class Trace(Expectation):
         spans, by_id = _build_span_index(ctx.trace)
         checks: list[CheckResult] = []
         for i, matcher in enumerate(self.matchers):
-            min_count = matcher.get("min", 1)
+            expected_count = matcher.get("exact", 1)
             parent = matcher.get("parent")
             matched = 0
             for span in spans:
@@ -152,13 +152,13 @@ class Trace(Expectation):
                     continue
                 matched += 1
             label = self.term_labels()[i]
-            passed = matched >= min_count
+            passed = matched == expected_count
             if passed:
                 detail = f"found {matched} matching span(s)"
             else:
                 kind = matcher.get("kind", "any")
                 detail = (
-                    f"expected at least {min_count} {kind!r} span(s) matching; "
+                    f"expected exactly {expected_count} {kind!r} span(s) matching; "
                     f"found {matched}"
                 )
                 if ctx.trace_url:
