@@ -235,6 +235,14 @@ class Expectation(ABC):
         over this hook so threading stays polymorphic (no ``isinstance``)."""
         return False
 
+    def needs_trace(self) -> bool:
+        """Whether resolving this expectation requires the context's trace.
+
+        Only ``trace`` does; the runner reduces over this hook so the
+        (retrying, potentially slow) trace fetch runs only for steps that
+        will read it, keeping the polymorphic pattern — no ``isinstance``."""
+        return False
+
     def is_injected_default(self) -> bool:
         """True when this instance was auto-injected rather than authored.
 

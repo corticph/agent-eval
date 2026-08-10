@@ -7,7 +7,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from typing import Any, Callable, Sequence
+from typing import Callable, Sequence
 
 from .client import AgentClient
 from .errors import ErrorCode, EvalError
@@ -22,6 +22,7 @@ from .provisioning import AgentPool
 from .reporting.trace import build_trace_url
 from .results import EvaluationResult, Sink, StepResult, UsageMetrics
 from .schemas.response import Response
+from .tracing import fetch_trace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -284,64 +285,6 @@ def _fold_missing_task_id(results: list[ExpectationResult], detail: str) -> None
             return
 
 
-_TRACE_RETRIES = 15
-_TRACE_RETRY_DELAY = 2.0
-_TRACE_STABILIZE_DELAY = 1.0
-
-
-def _span_count(trace: dict[str, Any] | None) -> int:
-    if not trace:
-        return 0
-    return sum(len(item.get("spans", [])) for item in trace.get("traces", []))
-
-
-def _fetch_trace(
-    client: AgentClient, context_id: str | None
-) -> dict[str, Any] | None:
-    """Fetch the OpenInference trace for *context_id*, retrying until stable.
-
-    The DB span exporter batches asynchronously, so spans appear in
-    successive flushes rather than all at once. We retry until the span
-    count stabilizes (two consecutive fetches agree), so a partial trace
-    does not cause false expectation failures. Returns ``None`` if no
-    context id is available or the trace never appears within the retry
-    budget.
-    """
-    if not context_id:
-        return None
-    last_count = -1
-    trace: dict[str, Any] | None = None
-    for attempt in range(_TRACE_RETRIES):
-        try:
-            trace = client.get_trace(context_id)
-            count = _span_count(trace)
-            if count > 0 and count == last_count:
-                return trace
-            last_count = count
-        except Exception:
-            _LOGGER.debug(
-                "trace fetch attempt %d failed for context %s",
-                attempt + 1,
-                context_id,
-                exc_info=True,
-            )
-        if attempt < _TRACE_RETRIES - 1:
-            delay = _TRACE_STABILIZE_DELAY if last_count > 0 else _TRACE_RETRY_DELAY
-            time.sleep(delay)
-    if trace and _span_count(trace) > 0:
-        _LOGGER.warning(
-            "trace for context %s did not stabilize after %d attempts; "
-            "returning last fetch with %d spans",
-            context_id, _TRACE_RETRIES, _span_count(trace),
-        )
-        return trace
-    _LOGGER.warning(
-        "no trace available for context %s after %d attempts",
-        context_id, _TRACE_RETRIES,
-    )
-    return None
-
-
 def execute_case(
     case: EvaluationCase,
     client: AgentClient,
@@ -390,11 +333,24 @@ def execute_case(
             if context_candidate:
                 current_context_id = context_candidate
 
-            trace_data = _fetch_trace(client, context_candidate)
-
-            trace_url = build_trace_url(
-                client.environment.trace_base_url, context_candidate
-            )
+            # Trace is fetched only for steps that assert on it — the hook
+            # keeps this polymorphic (no isinstance), and skipping the fetch
+            # entirely is the zero-cost path for suites without trace
+            # expectations: no extra requests, no retry sleeps, no dependency
+            # on the client exposing an environment's trace destination. The
+            # fetch keys on the threaded id, not the per-response candidate,
+            # so a continuation response that omits contextId still finds the
+            # trace for the context its request was sent under.
+            needs_trace = any(e.needs_trace() for e in step.expectations)
+            trace_data = None
+            trace_url = None
+            if needs_trace:
+                trace_data = fetch_trace(
+                    client, current_context_id, stop_event=stop_event
+                )
+                trace_url = build_trace_url(
+                    client.environment.trace_base_url, current_context_id
+                )
 
             results = evaluate_response(
                 step.expectations,

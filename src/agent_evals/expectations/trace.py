@@ -79,12 +79,20 @@ def _resolve_parent_chain(
 
 
 class Trace(Expectation):
-    """Assert that the OpenInference trace contains spans matching a path.
+    """Assert that the OpenInference trace for the case's context matches.
 
     Each entry is a span matcher: a dict that selects spans by ``kind``,
     ``name``, and/or ``attributes``, with an optional ``exact`` count for the
     expected number of matching spans (default 1), and an optional ``parent``
     matcher that a matched span's parent must also satisfy.
+
+    Matching runs against the trace of the WHOLE context, fetched per step:
+    in a sequential (multi-step) case sharing one context, span counts
+    accumulate across earlier steps. An ``exact`` count therefore describes
+    the conversation so far, not just the current step — a step-2 entry
+    ``kind: LLM`` fails when both steps produced one LLM span each. Assert
+    cumulative totals, or scope matchers with ``attributes``/``parent`` so
+    prior steps cannot match them.
 
     Example::
 
@@ -115,6 +123,9 @@ class Trace(Expectation):
 
     def to_raw(self) -> Any:
         return list(self.matchers)
+
+    def needs_trace(self) -> bool:
+        return True
 
     def term_labels(self) -> list[str]:
         labels: list[str] = []
