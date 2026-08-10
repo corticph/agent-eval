@@ -30,6 +30,11 @@ _LOGGER = logging.getLogger(__name__)
 
 PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_:\-\.]+)\s*}}")
 
+# agent-api's schema-tool transition enum. Warn rather than reject on an
+# unknown value: agent-api owns the enum, so a value we don't recognise may be
+# newer than this list, and blocking the run would be worse than flagging it.
+_VALID_TRANSITIONS = frozenset({"complete", "input_required"})
+
 
 def validate_timeout_seconds(value: float, *, context: str) -> float:
     """Require *value* to exceed the HTTP request timeout.
@@ -504,6 +509,17 @@ def _resolve_schema_ref_entry(entry: dict[str, Any], base_dir: Path) -> dict[str
     # Whether a tool ends the turn belongs to the tool, not to one suite.
     if "transition" not in connector and "transition" in schema_doc:
         connector["transition"] = schema_doc["transition"]
+    transition = connector.get("transition")
+    if transition is not None and transition not in _VALID_TRANSITIONS:
+        # A misspelled transition is silently ignored by agent-api, so the tool
+        # stops terminating the turn and the LLM falls back to input_required_tool.
+        _LOGGER.warning(
+            "Unknown transition %r for connector %r (expected one of %s); "
+            "agent-api will ignore it and the tool will not end the turn",
+            transition,
+            connector["name"],
+            sorted(_VALID_TRANSITIONS),
+        )
     connector["schema"] = resolved_schema
     return connector
 

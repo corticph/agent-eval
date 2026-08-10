@@ -69,7 +69,11 @@ def test_schema_ref_resolves_to_full_connector(tmp_path: Path) -> None:
     schema_path = _schema_file(tmp_path)
     config: dict[str, Any] = {
         "connectors": [
-            {"type": "schema", "schema_ref": schema_path.name, "transition": "manual"},
+            {
+                "type": "schema",
+                "schema_ref": schema_path.name,
+                "transition": "complete",
+            },
         ]
     }
     resolve_connectors(config, tmp_path)
@@ -82,7 +86,7 @@ def test_schema_ref_resolves_to_full_connector(tmp_path: Path) -> None:
     assert connector["name"] == "make_ehr_data_request"
     assert connector["description"] == "Request EHR data"
     assert connector["type"] == "schema"
-    assert connector["transition"] == "manual"
+    assert connector["transition"] == "complete"
     assert "schema_ref" not in connector
 
 
@@ -139,6 +143,33 @@ def test_entry_transition_survives_when_schema_file_has_none(tmp_path: Path) -> 
     }
     resolve_connectors(config, tmp_path)
     assert config["connectors"][0]["transition"] == "complete"
+
+
+def test_unknown_transition_warns_but_passes_through(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # agent-api owns the enum, so an unrecognised value may simply be newer
+    # than our list — flag it, don't block the run.
+    schema_path = _schema_file(tmp_path, transition="input-required")
+    config: dict[str, Any] = {
+        "connectors": [{"type": "schema", "schema_ref": schema_path.name}]
+    }
+    with caplog.at_level(logging.WARNING, logger="agent_evals.loader"):
+        resolve_connectors(config, tmp_path)
+    assert config["connectors"][0]["transition"] == "input-required"
+    assert any("input-required" in r.message for r in caplog.records)
+
+
+def test_valid_transition_does_not_warn(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    schema_path = _schema_file(tmp_path, transition="input_required")
+    config: dict[str, Any] = {
+        "connectors": [{"type": "schema", "schema_ref": schema_path.name}]
+    }
+    with caplog.at_level(logging.WARNING, logger="agent_evals.loader"):
+        resolve_connectors(config, tmp_path)
+    assert not [r for r in caplog.records if "transition" in r.message]
 
 
 def test_legacy_format_transition_not_read_from_tool(tmp_path: Path) -> None:
@@ -517,7 +548,11 @@ def test_load_suite_resolves_connectors_file_from_defaults(tmp_path: Path) -> No
     _write_json(
         tmp_path / "connectors.json",
         [
-            {"type": "schema", "schema_ref": schema_path.name, "transition": "manual"},
+            {
+                "type": "schema",
+                "schema_ref": schema_path.name,
+                "transition": "complete",
+            },
             {"type": "registry", "name": "expert_one"},
         ],
     )
@@ -537,7 +572,7 @@ def test_load_suite_resolves_connectors_file_from_defaults(tmp_path: Path) -> No
         "properties": {"category": {"type": "string"}},
         "required": ["category"],
     }
-    assert agent.connectors[0]["transition"] == "manual"
+    assert agent.connectors[0]["transition"] == "complete"
     # pass-through entry untouched
     assert agent.connectors[1] == {"type": "registry", "name": "expert_one"}
     # model passes through
