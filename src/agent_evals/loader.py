@@ -501,7 +501,7 @@ def _resolve_schema_ref_entry(entry: dict[str, Any], base_dir: Path) -> dict[str
         connector["description"] = file_description
     if "type" not in connector and "type" in schema_doc:
         connector["type"] = schema_doc["type"]
-    # Terminality is a property of the tool, so it is declared in the schema file.
+    # Whether a tool ends the turn belongs to the tool, not to one suite.
     if "transition" not in connector and "transition" in schema_doc:
         connector["transition"] = schema_doc["transition"]
     connector["schema"] = resolved_schema

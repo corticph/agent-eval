@@ -86,12 +86,7 @@ def test_schema_ref_resolves_to_full_connector(tmp_path: Path) -> None:
     assert "schema_ref" not in connector
 
 
-# --- transition lifting (AGENT-1458) ---------------------------------------
-#
-# ``transition`` marks a schema tool terminal. Dropping it makes agent-api
-# treat the tool as non-terminal, so the LLM burns an extra call on
-# ``input_required_tool`` to end the turn. Values must match the agent-api
-# enum: "complete" | "input_required".
+# --- transition lifting ----------------------------------------------------
 
 
 def test_schema_ref_transition_from_schema_file(tmp_path: Path) -> None:
@@ -144,6 +139,29 @@ def test_entry_transition_survives_when_schema_file_has_none(tmp_path: Path) -> 
     }
     resolve_connectors(config, tmp_path)
     assert config["connectors"][0]["transition"] == "complete"
+
+
+def test_legacy_format_transition_not_read_from_tool(tmp_path: Path) -> None:
+    # Only the top level of the schema doc is consulted, so a transition tucked
+    # inside the legacy ``tools[0]`` wrapper is deliberately not lifted.
+    schema_path = _write_json(
+        tmp_path / "tool_schema.json",
+        {
+            "tools": [
+                {
+                    "name": "make_ehr_data_request",
+                    "description": "Request EHR data",
+                    "inputSchema": {"type": "object", "properties": {}},
+                    "transition": "complete",
+                }
+            ]
+        },
+    )
+    config: dict[str, Any] = {
+        "connectors": [{"type": "schema", "schema_ref": schema_path.name}]
+    }
+    resolve_connectors(config, tmp_path)
+    assert "transition" not in config["connectors"][0]
 
 
 def test_entry_name_overrides_file_tool_name(tmp_path: Path) -> None:
