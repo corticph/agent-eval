@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from agent_evals.loader import resolve_connectors
+from agent_evals.loader import LIFTED_SCHEMA_DOC_KEYS, resolve_connectors
 
 
 def _write_json(path: Path, payload: object) -> Path:
@@ -130,26 +130,12 @@ def test_transition_absent_when_neither_entry_nor_file_sets_it(
     assert "transition" not in config["connectors"][0]
 
 
-def test_entry_transition_survives_when_schema_file_has_none(tmp_path: Path) -> None:
-    schema_path = _schema_file(tmp_path)
-    config: dict[str, Any] = {
-        "connectors": [
-            {
-                "type": "schema",
-                "schema_ref": schema_path.name,
-                "transition": "complete",
-            }
-        ]
-    }
-    resolve_connectors(config, tmp_path)
-    assert config["connectors"][0]["transition"] == "complete"
-
-
 def test_unknown_transition_warns_but_passes_through(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # agent-api owns the enum, so an unrecognised value may simply be newer
-    # than our list — flag it, don't block the run.
+    # agent-api owns the enum and rejects an unknown value at agent creation;
+    # an unrecognised value here may simply be newer than our list, so flag it
+    # rather than blocking the run.
     schema_path = _schema_file(tmp_path, transition="input-required")
     config: dict[str, Any] = {
         "connectors": [{"type": "schema", "schema_ref": schema_path.name}]
@@ -193,6 +179,29 @@ def test_legacy_format_transition_not_read_from_tool(tmp_path: Path) -> None:
     }
     resolve_connectors(config, tmp_path)
     assert "transition" not in config["connectors"][0]
+
+
+# --- lifted-key guard ------------------------------------------------------
+
+
+def test_every_lifted_key_reaches_the_resolved_connector(tmp_path: Path) -> None:
+    # AGENT-1458 was one of these keys present in the file and dropped by the
+    # lift. Assert the whole declared set, so a resolver rewrite (issue #160
+    # replaces this with JSON ``$ref``) cannot quietly lose one again.
+    doc = {
+        "name": "make_ehr_data_request",
+        "description": "Request EHR data",
+        "type": "schema",
+        "transition": "complete",
+        "schema": {"type": "object", "properties": {}},
+    }
+    schema_path = _write_json(tmp_path / "tool_schema.json", doc)
+    # No key but schema_ref on the entry, so every value has to come from the file.
+    config: dict[str, Any] = {"connectors": [{"schema_ref": schema_path.name}]}
+    resolve_connectors(config, tmp_path)
+    connector = config["connectors"][0]
+    unlifted = [k for k in LIFTED_SCHEMA_DOC_KEYS if connector.get(k) != doc[k]]
+    assert not unlifted, f"not lifted from the schema file: {unlifted}"
 
 
 def test_entry_name_overrides_file_tool_name(tmp_path: Path) -> None:

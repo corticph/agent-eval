@@ -30,10 +30,18 @@ _LOGGER = logging.getLogger(__name__)
 
 PLACEHOLDER_PATTERN = re.compile(r"{{\s*([a-zA-Z0-9_:\-\.]+)\s*}}")
 
-# agent-api's schema-tool transition enum. Warn rather than reject on an
-# unknown value: agent-api owns the enum, so a value we don't recognise may be
-# newer than this list, and blocking the run would be worse than flagging it.
+# agent-api's schema-tool transition enum, mirrored from
+# corticph/agent-api pkg/schematools/model.go (TransitionComplete,
+# TransitionInputRequired); it is enforced there by pkg/schematools/validate.go
+# and by the generated v2 API enum. Warn rather than reject on an unknown value:
+# agent-api owns the enum, so a value we don't recognise may be newer than this
+# list, and blocking the run would be worse than flagging it.
 _VALID_TRANSITIONS = frozenset({"complete", "input_required"})
+
+# Schema-document keys the resolver lifts onto the connector. Kept as a named
+# set so tests can pin it: AGENT-1458 was a key present in the file and missed
+# by the lift, and issue #160 replaces this resolver with JSON ``$ref``.
+LIFTED_SCHEMA_DOC_KEYS = ("name", "description", "type", "transition")
 
 
 def validate_timeout_seconds(value: float, *, context: str) -> float:
@@ -511,11 +519,11 @@ def _resolve_schema_ref_entry(entry: dict[str, Any], base_dir: Path) -> dict[str
         connector["transition"] = schema_doc["transition"]
     transition = connector.get("transition")
     if transition is not None and transition not in _VALID_TRANSITIONS:
-        # A misspelled transition is silently ignored by agent-api, so the tool
-        # stops terminating the turn and the LLM falls back to input_required_tool.
+        # agent-api rejects an unknown transition when the agent is created, so
+        # this only buys an earlier, clearer signal than that 400.
         _LOGGER.warning(
             "Unknown transition %r for connector %r (expected one of %s); "
-            "agent-api will ignore it and the tool will not end the turn",
+            "agent-api will reject this when the agent is created",
             transition,
             connector["name"],
             sorted(_VALID_TRANSITIONS),
