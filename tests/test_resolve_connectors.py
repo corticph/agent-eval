@@ -22,20 +22,21 @@ def _schema_file(
     tmp_path: Path,
     name: str = "make_ehr_data_request",
     description: str = "Request EHR data",
+    transition: str | None = None,
 ) -> Path:
-    return _write_json(
-        tmp_path / "tool_schema.json",
-        {
-            "name": name,
-            "description": description,
-            "schema": {
-                "type": "object",
-                "properties": {"category": {"type": "string"}},
-                "required": ["category"],
-            },
-            "type": "schema",
+    doc: dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "schema": {
+            "type": "object",
+            "properties": {"category": {"type": "string"}},
+            "required": ["category"],
         },
-    )
+        "type": "schema",
+    }
+    if transition is not None:
+        doc["transition"] = transition
+    return _write_json(tmp_path / "tool_schema.json", doc)
 
 
 def _legacy_schema_file(
@@ -83,6 +84,66 @@ def test_schema_ref_resolves_to_full_connector(tmp_path: Path) -> None:
     assert connector["type"] == "schema"
     assert connector["transition"] == "manual"
     assert "schema_ref" not in connector
+
+
+# --- transition lifting (AGENT-1458) ---------------------------------------
+#
+# ``transition`` marks a schema tool terminal. Dropping it makes agent-api
+# treat the tool as non-terminal, so the LLM burns an extra call on
+# ``input_required_tool`` to end the turn. Values must match the agent-api
+# enum: "complete" | "input_required".
+
+
+def test_schema_ref_transition_from_schema_file(tmp_path: Path) -> None:
+    schema_path = _schema_file(tmp_path, transition="complete")
+    config: dict[str, Any] = {
+        "connectors": [{"type": "schema", "schema_ref": schema_path.name}]
+    }
+    resolve_connectors(config, tmp_path)
+    assert config["connectors"][0]["transition"] == "complete"
+
+
+def test_entry_transition_overrides_schema_file_transition(tmp_path: Path) -> None:
+    schema_path = _schema_file(tmp_path, transition="complete")
+    config: dict[str, Any] = {
+        "connectors": [
+            {
+                "type": "schema",
+                "schema_ref": schema_path.name,
+                "transition": "input_required",
+            }
+        ]
+    }
+    resolve_connectors(config, tmp_path)
+    assert config["connectors"][0]["transition"] == "input_required"
+
+
+def test_transition_absent_when_neither_entry_nor_file_sets_it(
+    tmp_path: Path,
+) -> None:
+    # Absent, not None — a null would serialize into the v2 payload as an
+    # explicit null rather than being omitted.
+    schema_path = _schema_file(tmp_path)
+    config: dict[str, Any] = {
+        "connectors": [{"type": "schema", "schema_ref": schema_path.name}]
+    }
+    resolve_connectors(config, tmp_path)
+    assert "transition" not in config["connectors"][0]
+
+
+def test_entry_transition_survives_when_schema_file_has_none(tmp_path: Path) -> None:
+    schema_path = _schema_file(tmp_path)
+    config: dict[str, Any] = {
+        "connectors": [
+            {
+                "type": "schema",
+                "schema_ref": schema_path.name,
+                "transition": "complete",
+            }
+        ]
+    }
+    resolve_connectors(config, tmp_path)
+    assert config["connectors"][0]["transition"] == "complete"
 
 
 def test_entry_name_overrides_file_tool_name(tmp_path: Path) -> None:

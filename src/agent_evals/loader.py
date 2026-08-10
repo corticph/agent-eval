@@ -446,8 +446,9 @@ def _resolve_schema_ref_entry(entry: dict[str, Any], base_dir: Path) -> dict[str
     * **Legacy tools format**: ``{tools: [{name, description, inputSchema}]}`` —
       the schema is extracted from ``tools[0].inputSchema``.
 
-    In both cases, ``name`` and ``description`` are lifted from the file unless
-    the entry overrides them.
+    In both cases, ``name``, ``description``, ``type`` and ``transition`` are
+    lifted from the file unless the entry overrides them. ``transition`` is only
+    read from the top level of the schema document, never from ``tools[0]``.
     """
     schema_ref = entry.pop("schema_ref")
     schema_path = base_dir / schema_ref
@@ -500,6 +501,9 @@ def _resolve_schema_ref_entry(entry: dict[str, Any], base_dir: Path) -> dict[str
         connector["description"] = file_description
     if "type" not in connector and "type" in schema_doc:
         connector["type"] = schema_doc["type"]
+    # Terminality is a property of the tool, so it is declared in the schema file.
+    if "transition" not in connector and "transition" in schema_doc:
+        connector["transition"] = schema_doc["transition"]
     connector["schema"] = resolved_schema
     return connector
 
