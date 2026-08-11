@@ -437,7 +437,7 @@ def _resolve_data_files(config: Any, base_dir: Path) -> None:
 
 
 def _resolve_schema_ref_entry(entry: dict[str, Any], base_dir: Path) -> dict[str, Any]:
-    """Resolve a single ``schema_ref`` connector entry into a full v2 connector.
+    """Resolve a single ``schema_ref`` connector entry into a connector dict.
 
     Reads the referenced schema file. Supports two formats:
 
