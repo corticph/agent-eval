@@ -35,6 +35,7 @@ from .duration import MaxDuration
 from .llm import FaithfulToSource, Judge
 from .cited_pubmed_ids import CitedPubmedIds
 from .state import ExpectedState
+from .trace import Trace
 
 __all__ = [
     "CheckResult",
@@ -51,6 +52,7 @@ __all__ = [
     "MustIncludeJson",
     "MustMatch",
     "MustNotInclude",
+    "Trace",
     "evaluate_response",
     "parse_expectations",
     "registry",

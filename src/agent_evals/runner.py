@@ -19,8 +19,10 @@ from .expectations import (
 )
 from .loader import EvaluationCase, EvaluationSuite, SuiteOptions
 from .provisioning import AgentPool
+from .reporting.trace import build_trace_url
 from .results import EvaluationResult, Sink, StepResult, UsageMetrics
 from .schemas.response import Response
+from .tracing import fetch_trace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -326,13 +328,37 @@ def execute_case(
             raw_response = client.send_message(agent_id, request.to_dict())
             response = Response.from_dict(raw_response)
             step_duration = time.perf_counter() - step_start
-            results = evaluate_response(
-                step.expectations, raw_response, duration_seconds=step_duration
-            )
 
             context_candidate = response.resolved_context_id()
             if context_candidate:
                 current_context_id = context_candidate
+
+            # Trace is fetched only for steps that assert on it — the hook
+            # keeps this polymorphic (no isinstance), and skipping the fetch
+            # entirely is the zero-cost path for suites without trace
+            # expectations: no extra requests, no retry sleeps, no dependency
+            # on the client exposing an environment's trace destination. The
+            # fetch keys on the threaded id, not the per-response candidate,
+            # so a continuation response that omits contextId still finds the
+            # trace for the context its request was sent under.
+            needs_trace = any(e.needs_trace() for e in step.expectations)
+            trace_data = None
+            trace_url = None
+            if needs_trace:
+                trace_data = fetch_trace(
+                    client, current_context_id, stop_event=stop_event
+                )
+                trace_url = build_trace_url(
+                    client.environment.trace_base_url, current_context_id
+                )
+
+            results = evaluate_response(
+                step.expectations,
+                raw_response,
+                duration_seconds=step_duration,
+                trace=trace_data,
+                trace_url=trace_url,
+            )
 
             # Threading is polymorphic: a step carries its taskId forward iff one
             # of its expectations says so (only ``expected_state: input-required``

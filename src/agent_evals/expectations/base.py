@@ -160,6 +160,8 @@ class EvaluationContext:
     response: dict[str, Any] | None  # parsed response tree — jsonpath / json checks
     task_state: str | None  # raw terminal state string — expected_state
     duration_seconds: float | None
+    trace: dict[str, Any] | None = None  # OpenInference trace JSON — trace expectations
+    trace_url: str | None = None  # Opik trace URL — included in trace failure details
 
     @classmethod
     def from_response(
@@ -167,6 +169,8 @@ class EvaluationContext:
         response: dict[str, Any] | None,
         *,
         duration_seconds: float | None = None,
+        trace: dict[str, Any] | None = None,
+        trace_url: str | None = None,
     ) -> "EvaluationContext":
         return cls(
             haystack=extract_textual_response(response),
@@ -174,6 +178,8 @@ class EvaluationContext:
             response=response,
             task_state=Response.from_dict(response).state,
             duration_seconds=duration_seconds,
+            trace=trace,
+            trace_url=trace_url,
         )
 
 
@@ -227,6 +233,14 @@ class Expectation(ABC):
         """Whether this expectation signals the case should thread into the next
         step. Only ``expected_state: input-required`` does; the runner reduces
         over this hook so threading stays polymorphic (no ``isinstance``)."""
+        return False
+
+    def needs_trace(self) -> bool:
+        """Whether resolving this expectation requires the context's trace.
+
+        Only ``trace`` does; the runner reduces over this hook so the
+        (retrying, potentially slow) trace fetch runs only for steps that
+        will read it, keeping the polymorphic pattern — no ``isinstance``."""
         return False
 
     def is_injected_default(self) -> bool:
@@ -322,6 +336,8 @@ def evaluate_response(
     response: dict[str, Any] | None,
     *,
     duration_seconds: float | None = None,
+    trace: dict[str, Any] | None = None,
+    trace_url: str | None = None,
 ) -> list[ExpectationResult]:
     """Resolve *expectations* against *response* into per-term results.
 
@@ -330,5 +346,10 @@ def evaluate_response(
     order. The returned list is the single per-term truth both sinks render from;
     a miss exists only as its failed check within it.
     """
-    ctx = EvaluationContext.from_response(response, duration_seconds=duration_seconds)
+    ctx = EvaluationContext.from_response(
+        response,
+        duration_seconds=duration_seconds,
+        trace=trace,
+        trace_url=trace_url,
+    )
     return resolve_all(expectations, ctx)
