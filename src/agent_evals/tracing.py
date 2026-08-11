@@ -16,9 +16,14 @@ from .client import AgentClient
 
 _LOGGER = logging.getLogger(__name__)
 
-_TRACE_RETRIES = 15
+_TRACE_RETRIES = 20
 _TRACE_RETRY_DELAY = 2.0
-_TRACE_STABILIZE_DELAY = 1.0
+_TRACE_STABILIZE_DELAY = 2.0
+# Consecutive equal counts required before a trace is considered complete.
+# With the delay above this is a ~6s quiet window, comfortably wider than the
+# exporter's batch period — one agreement only proves we sampled twice inside
+# the same lull between flushes.
+_TRACE_STABLE_POLLS = 4
 
 
 def _span_count(trace: dict[str, Any] | None) -> int:
@@ -37,14 +42,18 @@ def fetch_trace(
 
     The DB span exporter batches asynchronously, so spans appear in
     successive flushes rather than all at once. We retry until the span
-    count stabilizes (two consecutive fetches agree), so a partial trace
-    does not cause false expectation failures. Returns ``None`` if no
+    count holds steady across ``_TRACE_STABLE_POLLS`` consecutive fetches,
+    so a partial trace does not cause false expectation failures. The window
+    matters: a single agreement is satisfied by two samples taken inside one
+    lull between flushes, which is how a trace whose CHAIN spans have landed
+    but whose TOOL span has not reads as finished. Returns ``None`` if no
     context id is available or the trace never appears within the retry
     budget. Sleeps honor *stop_event* so cancellation stays cooperative.
     """
     if not context_id:
         return None
     last_count = -1
+    repeats = 0
     trace: dict[str, Any] | None = None
     for attempt in range(_TRACE_RETRIES):
         if stop_event is not None and stop_event.is_set():
@@ -53,7 +62,11 @@ def fetch_trace(
             trace = client.get_trace(context_id)
             count = _span_count(trace)
             if count > 0 and count == last_count:
-                return trace
+                repeats += 1
+                if repeats >= _TRACE_STABLE_POLLS - 1:
+                    return trace
+            else:
+                repeats = 0
             last_count = count
         except Exception:
             _LOGGER.debug(
