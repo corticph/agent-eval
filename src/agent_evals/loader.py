@@ -519,10 +519,11 @@ def resolve_connectors(config: Any, base_dir: Path) -> None:
     """Walk the raw config and resolve ``connectors_file`` / ``schema_ref`` references.
 
     For each dict carrying a ``connectors_file`` key, the referenced JSON array
-    is loaded and its ``schema_ref`` entries resolved into full v2
-    ``SchemaConnector`` objects; the result replaces ``connectors_file`` as an
-    inline ``connectors`` array. Inline ``connectors`` arrays (without a
-    ``connectors_file``) have their ``schema_ref`` entries resolved in place.
+    is loaded and its ``schema_ref`` entries resolved into plain connector
+    dicts — nothing here validates them against the v2 wire shape; the result
+    replaces ``connectors_file`` as an inline ``connectors`` array. Inline
+    ``connectors`` arrays (without a ``connectors_file``) have their
+    ``schema_ref`` entries resolved in place.
     Entries without ``schema_ref`` (e.g. ``type: registry``, ``type: mcp``)
     pass through untouched.
     """
