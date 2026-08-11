@@ -22,20 +22,21 @@ def _schema_file(
     tmp_path: Path,
     name: str = "make_ehr_data_request",
     description: str = "Request EHR data",
+    transition: str | None = None,
 ) -> Path:
-    return _write_json(
-        tmp_path / "tool_schema.json",
-        {
-            "name": name,
-            "description": description,
-            "schema": {
-                "type": "object",
-                "properties": {"category": {"type": "string"}},
-                "required": ["category"],
-            },
-            "type": "schema",
+    doc: dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "schema": {
+            "type": "object",
+            "properties": {"category": {"type": "string"}},
+            "required": ["category"],
         },
-    )
+        "type": "schema",
+    }
+    if transition is not None:
+        doc["transition"] = transition
+    return _write_json(tmp_path / "tool_schema.json", doc)
 
 
 def _legacy_schema_file(
@@ -68,7 +69,11 @@ def test_schema_ref_resolves_to_full_connector(tmp_path: Path) -> None:
     schema_path = _schema_file(tmp_path)
     config: dict[str, Any] = {
         "connectors": [
-            {"type": "schema", "schema_ref": schema_path.name, "transition": "manual"},
+            {
+                "type": "schema",
+                "schema_ref": schema_path.name,
+                "transition": "complete",
+            },
         ]
     }
     resolve_connectors(config, tmp_path)
@@ -81,8 +86,71 @@ def test_schema_ref_resolves_to_full_connector(tmp_path: Path) -> None:
     assert connector["name"] == "make_ehr_data_request"
     assert connector["description"] == "Request EHR data"
     assert connector["type"] == "schema"
-    assert connector["transition"] == "manual"
+    assert connector["transition"] == "complete"
     assert "schema_ref" not in connector
+
+
+# --- transition lifting ----------------------------------------------------
+
+
+def test_schema_ref_transition_from_schema_file(tmp_path: Path) -> None:
+    schema_path = _schema_file(tmp_path, transition="complete")
+    config: dict[str, Any] = {
+        "connectors": [{"type": "schema", "schema_ref": schema_path.name}]
+    }
+    resolve_connectors(config, tmp_path)
+    assert config["connectors"][0]["transition"] == "complete"
+
+
+def test_entry_transition_overrides_schema_file_transition(tmp_path: Path) -> None:
+    schema_path = _schema_file(tmp_path, transition="complete")
+    config: dict[str, Any] = {
+        "connectors": [
+            {
+                "type": "schema",
+                "schema_ref": schema_path.name,
+                "transition": "input_required",
+            }
+        ]
+    }
+    resolve_connectors(config, tmp_path)
+    assert config["connectors"][0]["transition"] == "input_required"
+
+
+def test_transition_absent_when_neither_entry_nor_file_sets_it(
+    tmp_path: Path,
+) -> None:
+    # Absent, not None — a null would serialize into the v2 payload as an
+    # explicit null rather than being omitted.
+    schema_path = _schema_file(tmp_path)
+    config: dict[str, Any] = {
+        "connectors": [{"type": "schema", "schema_ref": schema_path.name}]
+    }
+    resolve_connectors(config, tmp_path)
+    assert "transition" not in config["connectors"][0]
+
+
+def test_legacy_format_transition_not_read_from_tool(tmp_path: Path) -> None:
+    # Only the top level of the schema doc is consulted, so a transition tucked
+    # inside the legacy ``tools[0]`` wrapper is deliberately not lifted.
+    schema_path = _write_json(
+        tmp_path / "tool_schema.json",
+        {
+            "tools": [
+                {
+                    "name": "make_ehr_data_request",
+                    "description": "Request EHR data",
+                    "inputSchema": {"type": "object", "properties": {}},
+                    "transition": "complete",
+                }
+            ]
+        },
+    )
+    config: dict[str, Any] = {
+        "connectors": [{"type": "schema", "schema_ref": schema_path.name}]
+    }
+    resolve_connectors(config, tmp_path)
+    assert "transition" not in config["connectors"][0]
 
 
 def test_entry_name_overrides_file_tool_name(tmp_path: Path) -> None:
@@ -438,7 +506,11 @@ def test_load_suite_resolves_connectors_file_from_defaults(tmp_path: Path) -> No
     _write_json(
         tmp_path / "connectors.json",
         [
-            {"type": "schema", "schema_ref": schema_path.name, "transition": "manual"},
+            {
+                "type": "schema",
+                "schema_ref": schema_path.name,
+                "transition": "complete",
+            },
             {"type": "registry", "name": "expert_one"},
         ],
     )
@@ -458,7 +530,7 @@ def test_load_suite_resolves_connectors_file_from_defaults(tmp_path: Path) -> No
         "properties": {"category": {"type": "string"}},
         "required": ["category"],
     }
-    assert agent.connectors[0]["transition"] == "manual"
+    assert agent.connectors[0]["transition"] == "complete"
     # pass-through entry untouched
     assert agent.connectors[1] == {"type": "registry", "name": "expert_one"}
     # model passes through

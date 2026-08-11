@@ -51,10 +51,10 @@ def test_schema_includes_transition_when_set() -> None:
         "type": "schema",
         "name": "tool",
         "schema": {"type": "object"},
-        "transition": "immediate",
+        "transition": "complete",
     }
     conn = SchemaConnector.from_dict(data)
-    assert conn.transition == "immediate"
+    assert conn.transition == "complete"
     assert conn.to_dict() == data
 
 

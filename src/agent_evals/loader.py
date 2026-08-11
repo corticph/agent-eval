@@ -437,7 +437,7 @@ def _resolve_data_files(config: Any, base_dir: Path) -> None:
 
 
 def _resolve_schema_ref_entry(entry: dict[str, Any], base_dir: Path) -> dict[str, Any]:
-    """Resolve a single ``schema_ref`` connector entry into a full v2 connector.
+    """Resolve a single ``schema_ref`` connector entry into a connector dict.
 
     Reads the referenced schema file. Supports two formats:
 
@@ -446,8 +446,9 @@ def _resolve_schema_ref_entry(entry: dict[str, Any], base_dir: Path) -> dict[str
     * **Legacy tools format**: ``{tools: [{name, description, inputSchema}]}`` —
       the schema is extracted from ``tools[0].inputSchema``.
 
-    In both cases, ``name`` and ``description`` are lifted from the file unless
-    the entry overrides them.
+    In both cases, ``name``, ``description``, ``type`` and ``transition`` are
+    lifted from the file unless the entry overrides them. ``transition`` is only
+    read from the top level of the schema document, never from ``tools[0]``.
     """
     schema_ref = entry.pop("schema_ref")
     schema_path = base_dir / schema_ref
@@ -500,6 +501,9 @@ def _resolve_schema_ref_entry(entry: dict[str, Any], base_dir: Path) -> dict[str
         connector["description"] = file_description
     if "type" not in connector and "type" in schema_doc:
         connector["type"] = schema_doc["type"]
+    # Whether a tool ends the turn belongs to the tool, not to one suite.
+    if "transition" not in connector and "transition" in schema_doc:
+        connector["transition"] = schema_doc["transition"]
     connector["schema"] = resolved_schema
     return connector
 
@@ -515,10 +519,11 @@ def resolve_connectors(config: Any, base_dir: Path) -> None:
     """Walk the raw config and resolve ``connectors_file`` / ``schema_ref`` references.
 
     For each dict carrying a ``connectors_file`` key, the referenced JSON array
-    is loaded and its ``schema_ref`` entries resolved into full v2
-    ``SchemaConnector`` objects; the result replaces ``connectors_file`` as an
-    inline ``connectors`` array. Inline ``connectors`` arrays (without a
-    ``connectors_file``) have their ``schema_ref`` entries resolved in place.
+    is loaded and its ``schema_ref`` entries resolved into plain connector
+    dicts — nothing here validates them against the v2 wire shape; the result
+    replaces ``connectors_file`` as an inline ``connectors`` array. Inline
+    ``connectors`` arrays (without a ``connectors_file``) have their
+    ``schema_ref`` entries resolved in place.
     Entries without ``schema_ref`` (e.g. ``type: registry``, ``type: mcp``)
     pass through untouched.
     """
