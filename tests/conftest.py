@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import pytest
 
+from agent_evals import tracing
+
 # Placeholder hydration for the environments that used to be source literals.
 # Non-corti hosts and non-UUID project ids on purpose: these are test doubles,
 # not the real internal values, which live only in the shared `.env`.
@@ -57,3 +59,14 @@ def hydrate_environments(monkeypatch: pytest.MonkeyPatch) -> None:
     # A developer's shell may carry the local URL override; tests must see
     # the default local URL unless a test sets it.
     monkeypatch.delenv("AGENT_API_URL_LOCAL", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def fast_trace_polling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the trace-poll sleeps so the suite does not wait out real windows.
+
+    Only the delays are patched; the retry budget and the stabilization rule
+    they pace stay exactly as shipped, so tests still exercise the real policy.
+    """
+    monkeypatch.setattr(tracing, "_TRACE_RETRY_DELAY", 0.0)
+    monkeypatch.setattr(tracing, "_TRACE_STABILIZE_DELAY", 0.0)
