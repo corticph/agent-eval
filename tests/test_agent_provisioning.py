@@ -33,7 +33,14 @@ class _RecordingClient:
         self._recorder = recorder or _Recorder()
 
     def create_agent(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return {"id": self._recorder.record_create(payload)}
+        agent_id = self._recorder.record_create(payload)
+        response: dict[str, Any] = {"id": agent_id}
+        connectors = payload.get("connectors") or []
+        if connectors:
+            response["connectors"] = [
+                {**c, "id": self._recorder.next_connector_id()} for c in connectors
+            ]
+        return response
 
     def send_message(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         self._recorder.record_send(agent_id)
@@ -64,6 +71,7 @@ class _Recorder:
         self._lock = threading.Lock()
         self._events: list[tuple[str, str]] = []  # ("create", id) | ("send", agent_id)
         self._counter = 0
+        self._con_counter = 0
         self.created_payloads: list[dict[str, Any]] = []
 
     def record_create(self, payload: dict[str, Any]) -> str:
@@ -74,6 +82,11 @@ class _Recorder:
             # a real client would serialize; the copy catches later mutation
             self.created_payloads.append(deepcopy(payload))
             return agent_id
+
+    def next_connector_id(self) -> str:
+        with self._lock:
+            self._con_counter += 1
+            return f"con-{self._con_counter}"
 
     def record_send(self, agent_id: str) -> None:
         with self._lock:

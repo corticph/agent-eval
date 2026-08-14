@@ -92,14 +92,35 @@ def _create_targeted_agent(
         raise RuntimeError(f"Connector {connector_name!r} not found in agent spec")
     if _is_inline_agent(connector):
         payload = _resolve_inline_agents(client, _connector_definition(connector))
+        return _create_agent(client, payload)
     elif connector.get("type") == "registry":
         payload = {"name": connector_name, "connectors": [connector]}
+        response = client.create_agent(payload)
+        # Send messages directly to the connector id (e.g. con.xxx), not to the
+        # wrapper agent id — the wrapper's system prompt makes it an orchestrator
+        # that re-delegates, defeating the purpose of targeting the connector.
+        connector_id = next(
+            (
+                c.get("id")
+                for c in response.get("connectors") or []
+                if c.get("name") == connector_name
+                and isinstance(c.get("id"), str)
+                and c.get("id")
+            ),
+            None,
+        )
+        if not connector_id:
+            raise RuntimeError(
+                f"Registry connector {connector_name!r} creation response did not contain a connector id"
+            )
+        # TODO Bug... The API returns ids with a type prefix (e.g. "con.uuid"); the send
+        # endpoint takes only the bare uuid portion after the first dot.
+        return connector_id.split(".", 1)[-1]
     else:
         raise ValueError(
             f"Connector {connector_name!r} of type {connector.get('type')!r} "
             "cannot be targeted with use_connector_name"
         )
-    return _create_agent(client, payload)
 
 
 def provision_agent(
