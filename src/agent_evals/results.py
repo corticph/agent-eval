@@ -153,8 +153,6 @@ class StepResult:
     # The conversation identifier (Opik threads are keyed by it) — stamped once
     # by execution; there is no separate trace id.
     context_id: str | None = None
-    # The agent that handled this step — the step override's id when present,
-    # otherwise the case-level agent's id. Per-step attribution.
     agent_id: str | None = None
     usage: UsageMetrics | None = None
     # The per-term ``ExpectationResult`` list — the source of truth both sinks

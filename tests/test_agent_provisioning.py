@@ -347,15 +347,6 @@ def test_sequential_case_reuses_one_agent_across_all_turns() -> None:
     assert results[0].agent_id == "agent-1"
 
 
-# ---------------------------------------------------------------------------
-# Per-step agent override provisioning (AGENT-986)
-# ---------------------------------------------------------------------------
-
-
-def _step_with_agent(name: str, agent: Agent, **extra: Any) -> Step:
-    return Step(name=name, message=_message(name), agent=agent, **extra)
-
-
 def test_step_agent_override_is_provisioned_and_messaged() -> None:
     client = _RecordingClient()
     case = EvaluationCase(
@@ -363,15 +354,13 @@ def test_step_agent_override_is_provisioned_and_messaged() -> None:
         agent=_agent("CaseAgent"),
         steps=[
             Step(name="first", message=_message("hello")),
-            _step_with_agent("second", _agent("StepAgent")),
+            Step(name="second", message=_message("switch"), agent=_agent("StepAgent")),
         ],
     )
 
     results = run_suite(_suite([case]), client)
 
-    # Case agent + step agent = two creates.
     assert client.create_count == 2
-    # Step 1 → case agent, step 2 → step agent.
     assert client.sent_to == ["agent-1", "agent-2"]
     assert results[0].agent_id == "agent-1"
 
@@ -384,20 +373,18 @@ def test_two_steps_with_identical_agent_share_one_provisioning() -> None:
         agent=_agent("CaseAgent"),
         steps=[
             Step(name="first", message=_message("hello")),
-            _step_with_agent("second", step_agent),
-            _step_with_agent("third", step_agent),
+            Step(name="second", message=_message("a"), agent=step_agent),
+            Step(name="third", message=_message("b"), agent=step_agent),
         ],
     )
 
     run_suite(_suite([case]), client)
 
-    # Case agent + one shared step agent = two creates, not three.
     assert client.create_count == 2
-    # Step 1 → case agent, steps 2 and 3 → same step agent.
     assert client.sent_to == ["agent-1", "agent-2", "agent-2"]
 
 
-def test_step_use_connector_name_targets_named_connector() -> None:
+def test_step_use_connector_name_targets_and_dedups() -> None:
     spec = _agent(
         "Orchestrator",
         connectors=[
@@ -411,14 +398,20 @@ def test_step_use_connector_name_targets_named_connector() -> None:
         agent=_agent("CaseAgent"),
         steps=[
             Step(
-                name="via_research",
-                message=_message("research"),
+                name="research_a",
+                message=_message("a"),
                 agent=spec,
                 use_connector_name="research",
             ),
             Step(
-                name="via_writing",
-                message=_message("writing"),
+                name="research_b",
+                message=_message("b"),
+                agent=spec,
+                use_connector_name="research",
+            ),
+            Step(
+                name="writing",
+                message=_message("c"),
                 agent=spec,
                 use_connector_name="writing",
             ),
@@ -427,48 +420,12 @@ def test_step_use_connector_name_targets_named_connector() -> None:
 
     run_suite(_suite([case]), client)
 
-    # Case agent + research + writing = three creates.
     assert client.create_count == 3
-    # Each step sends to its own targeted connector agent.
-    assert client.sent_to[0] != client.sent_to[1]
-
-
-def test_step_same_agent_same_connector_dedup() -> None:
-    spec = _agent(
-        "Orchestrator",
-        connectors=[{"type": "registry", "name": "research"}],
-    )
-    client = _RecordingClient()
-    case = EvaluationCase(
-        name="dedup_connector",
-        agent=_agent("CaseAgent"),
-        steps=[
-            Step(
-                name="first",
-                message=_message("a"),
-                agent=spec,
-                use_connector_name="research",
-            ),
-            Step(
-                name="second",
-                message=_message("b"),
-                agent=spec,
-                use_connector_name="research",
-            ),
-        ],
-    )
-
-    run_suite(_suite([case]), client)
-
-    # Case agent + one shared connector-targeted step agent = two creates.
-    assert client.create_count == 2
-    # Both steps send to the same connector agent.
     assert client.sent_to[0] == client.sent_to[1]
+    assert client.sent_to[2] != client.sent_to[0]
 
 
 def test_step_agent_and_case_agent_with_same_spec_dedup() -> None:
-    """A step agent with the same spec as the case agent dedups to one
-    provisioned agent — same spec + same connector (both None) = same key."""
     shared_spec = _agent("SameSpec")
     client = _RecordingClient()
     case = EvaluationCase(
@@ -476,13 +433,11 @@ def test_step_agent_and_case_agent_with_same_spec_dedup() -> None:
         agent=shared_spec,
         steps=[
             Step(name="first", message=_message("a")),
-            _step_with_agent("second", shared_spec),
+            Step(name="second", message=_message("b"), agent=shared_spec),
         ],
     )
 
     run_suite(_suite([case]), client)
 
-    # Both specs share one key (same agent, no connector), so dedup
-    # collapses them to one create.
     assert client.create_count == 1
     assert client.sent_to == ["agent-1", "agent-1"]

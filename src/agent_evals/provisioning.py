@@ -22,8 +22,8 @@ def _extract_agent_id(agent_response: dict[str, Any]) -> str | None:
     return None
 
 
-def _create_from_payload(client: AgentClient, payload: dict[str, Any]) -> str:
-    """Create an agent from a raw payload dict and return its id."""
+def _create_agent(client: AgentClient, payload: dict[str, Any]) -> str:
+    """Create an agent and return its id, or raise if the response has none."""
     response = client.create_agent(payload)
     agent_id = _extract_agent_id(response)
     if not agent_id:
@@ -59,7 +59,7 @@ def _resolve_inline_agents(
     resolved: list[dict[str, Any]] = []
     for connector in connectors:
         if _is_inline_agent(connector):
-            sub_id = _create_from_payload(
+            sub_id = _create_agent(
                 client, _resolve_inline_agents(client, _connector_definition(connector))
             )
             _LOGGER.debug(
@@ -93,7 +93,7 @@ def _create_targeted_agent(
         raise RuntimeError(f"Connector {connector_name!r} not found in agent spec")
     if _is_inline_agent(connector):
         payload = _resolve_inline_agents(client, _connector_definition(connector))
-        return _create_from_payload(client, payload)
+        return _create_agent(client, payload)
     elif connector.get("type") == "registry":
         payload = {"name": connector_name, "connectors": [connector]}
         response = client.create_agent(payload)
@@ -137,18 +137,7 @@ def provision_agent(
     """
     if connector_name:
         return _create_targeted_agent(client, agent_payload, connector_name)
-    return _create_from_payload(client, _resolve_inline_agents(client, agent_payload))
-
-
-def _create_agent(
-    client: AgentClient, agent: Agent, use_connector_name: str | None = None
-) -> str:
-    """Provision an Agent object via :func:`provision_agent` and return its id."""
-    agent_id = provision_agent(client, agent.to_dict(), use_connector_name)
-    _LOGGER.debug(
-        "Created agent %s (connector=%s)", agent_id, use_connector_name or "default"
-    )
-    return agent_id
+    return _create_agent(client, _resolve_inline_agents(client, agent_payload))
 
 
 class AgentPool:
@@ -164,11 +153,8 @@ class AgentPool:
 
     @staticmethod
     def _agent_key(agent: Agent, use_connector_name: str | None = None) -> str:
-        # Key on the authored spec plus the targeted connector — never the
-        # provisioned payload, which embeds freshly created inline sub-agent
-        # ids and so would differ every run and defeat dedup. Shared across
-        # case-level and step-level calls so identical specs dedup regardless
-        # of where they appear.
+        # Key on the authored spec + connector, not the provisioned payload
+        # (which embeds fresh inline sub-agent ids that change every run).
         return json.dumps(
             {
                 "agent": agent.to_dict(),
@@ -187,16 +173,16 @@ class AgentPool:
             if not case.agent_id_override:
                 key = self._agent_key(case.agent, case.use_connector_name)
                 if key not in self._by_key:
-                    self._by_key[key] = _create_agent(
-                        client, case.agent, case.use_connector_name
+                    self._by_key[key] = provision_agent(
+                        client, case.agent.to_dict(), case.use_connector_name
                     )
             for step in case.steps:
                 if step.agent is None:
                     continue
                 step_key = self._agent_key(step.agent, step.use_connector_name)
                 if step_key not in self._by_key:
-                    self._by_key[step_key] = _create_agent(
-                        client, step.agent, step.use_connector_name
+                    self._by_key[step_key] = provision_agent(
+                        client, step.agent.to_dict(), step.use_connector_name
                     )
 
     def agent_id_for(self, case: EvaluationCase) -> str:

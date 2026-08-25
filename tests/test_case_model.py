@@ -173,10 +173,6 @@ def test_stray_type_key_is_ignored(tmp_path: Path) -> None:
     assert len(case.steps) == 1
 
 
-# ---------------------------------------------------------------------------
-# Step-level agent override (AGENT-986)
-# ---------------------------------------------------------------------------
-
 STEP_AGENT_STANDALONE = """\
 name: standalone_step_agent
 globals:
@@ -212,21 +208,14 @@ evals:
 
 
 def test_step_agent_is_standalone_not_merged_with_globals(tmp_path: Path) -> None:
-    """A step's agent override carries only what the step declares — no
-    inheritance of globals' systemPrompt, connectors, or any other field."""
     (case,) = load_suite(_write_suite(tmp_path, STEP_AGENT_STANDALONE)).cases
+    assert case.steps[0].agent is None
     step_agent = case.steps[1].agent
     assert step_agent is not None
     assert step_agent.name == "StepAgent"
     assert step_agent.description == "Step-level agent"
-    # No inheritance from globals.
     assert step_agent.system_prompt is None
     assert step_agent.connectors == []
-
-
-def test_step_without_agent_has_none(tmp_path: Path) -> None:
-    (case,) = load_suite(_write_suite(tmp_path, STEP_AGENT_STANDALONE)).cases
-    assert case.steps[0].agent is None
 
 
 STEP_USE_CONNECTOR = """\
