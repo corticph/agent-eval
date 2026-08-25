@@ -7,7 +7,8 @@ import logging
 from typing import Any, Iterable
 
 from .client import AgentClient
-from .loader import EvaluationCase
+from .loader import EvaluationCase, Step
+from .schemas.agent import Agent
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -139,17 +140,6 @@ def provision_agent(
     return _create_agent(client, _resolve_inline_agents(client, agent_payload))
 
 
-def _create_agent_for_case(client: AgentClient, case: EvaluationCase) -> str:
-    """Create the agent a case messages and return its id.
-
-    A case pinning an explicit id never reaches here — the pool resolves that
-    without creating anything.
-    """
-    agent_id = provision_agent(client, case.agent.to_dict(), case.use_connector_name)
-    _LOGGER.debug("Created agent %s for case %s", agent_id, case.name)
-    return agent_id
-
-
 class AgentPool:
     """A run's ``key -> agent_id`` map.
 
@@ -162,14 +152,13 @@ class AgentPool:
         self._by_key: dict[str, str] = {}
 
     @staticmethod
-    def _key(case: EvaluationCase) -> str:
-        # Key on the authored spec plus the targeted connector — never the
-        # provisioned payload, which embeds freshly created inline sub-agent
-        # ids and so would differ every run and defeat dedup.
+    def _agent_key(agent: Agent, use_connector_name: str | None = None) -> str:
+        # Key on the authored spec + connector, not the provisioned payload
+        # (which embeds fresh inline sub-agent ids that change every run).
         return json.dumps(
             {
-                "agent": case.agent.to_dict(),
-                "use_connector_name": case.use_connector_name,
+                "agent": agent.to_dict(),
+                "use_connector_name": use_connector_name,
             },
             sort_keys=True,
         )
@@ -181,15 +170,27 @@ class AgentPool:
         spec surfaces up front rather than as a wall of per-case errors.
         """
         for case in cases:
-            if case.agent_id_override:
-                continue  # the override *is* the id; nothing to create
-            key = self._key(case)
-            if key in self._by_key:
-                continue
-            self._by_key[key] = _create_agent_for_case(client, case)
+            if not case.agent_id_override:
+                key = self._agent_key(case.agent, case.use_connector_name)
+                if key not in self._by_key:
+                    self._by_key[key] = provision_agent(
+                        client, case.agent.to_dict(), case.use_connector_name
+                    )
+            for step in case.steps:
+                if step.agent is None:
+                    continue
+                step_key = self._agent_key(step.agent, step.use_connector_name)
+                if step_key not in self._by_key:
+                    self._by_key[step_key] = provision_agent(
+                        client, step.agent.to_dict(), step.use_connector_name
+                    )
 
     def agent_id_for(self, case: EvaluationCase) -> str:
         """Return the provisioned (or overridden) agent id for a case."""
         if case.agent_id_override:
             return case.agent_id_override
-        return self._by_key[self._key(case)]
+        return self._by_key[self._agent_key(case.agent, case.use_connector_name)]
+
+    def agent_id_for_step(self, step: Step) -> str:
+        """Return the provisioned agent id for a step-level agent override."""
+        return self._by_key[self._agent_key(step.agent, step.use_connector_name)]

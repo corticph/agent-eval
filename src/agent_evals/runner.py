@@ -252,7 +252,9 @@ def _run_case_with_timeout(
     return result_box[0]
 
 
-def _harness_failure_step(error: EvalError) -> StepResult:
+def _harness_failure_step(
+    error: EvalError, agent_id: str | None = None
+) -> StepResult:
     """A synthetic Step Trail entry for a failure that never reached a send.
 
     A timeout or a failure before the request was built has no Step of its own,
@@ -265,6 +267,7 @@ def _harness_failure_step(error: EvalError) -> StepResult:
         request=None,
         response=None,
         harness_error=error,
+        agent_id=agent_id,
     )
 
 
@@ -311,6 +314,9 @@ def execute_case(
 
         for step in case.steps:
             _check_cancelled(stop_event)
+            step_agent_id = agent_id
+            if step.agent is not None:
+                step_agent_id = pool.agent_id_for_step(step)
             if step.delay_before_seconds is not None and step.delay_before_seconds > 0:
                 _LOGGER.debug(
                     "Sleeping %.3f seconds before step %s",
@@ -325,7 +331,7 @@ def execute_case(
             _check_cancelled(stop_event)
             request = step.message.prepare(current_context_id, current_task_id)
             step_start = time.perf_counter()
-            raw_response = client.send_message(agent_id, request.to_dict())
+            raw_response = client.send_message(step_agent_id, request.to_dict())
             response = Response.from_dict(raw_response)
             step_duration = time.perf_counter() - step_start
 
@@ -384,6 +390,7 @@ def execute_case(
                     response=response,
                     duration_seconds=step_duration,
                     context_id=context_candidate,
+                    agent_id=step_agent_id,
                     usage=UsageMetrics.from_response(raw_response),
                     results=results,
                 )
@@ -405,7 +412,9 @@ def execute_case(
     except Exception as exc:  # pragma: no cover - defensive logging
         _LOGGER.exception("Evaluation %s raised an exception", case.name)
         duration = time.perf_counter() - start
-        step_results.append(_harness_failure_step(EvalError.from_exception(exc)))
+        step_results.append(_harness_failure_step(
+            EvalError.from_exception(exc), agent_id=agent_id
+        ))
         return EvaluationResult(
             name=case.name,
             success=False,

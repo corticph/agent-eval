@@ -171,3 +171,88 @@ def test_stray_type_key_is_ignored(tmp_path: Path) -> None:
     body = FLAT_CASE.replace("  - name: greet\n", "  - name: greet\n    type: single\n")
     (case,) = load_suite(_write_suite(tmp_path, body)).cases
     assert len(case.steps) == 1
+
+
+STEP_AGENT_STANDALONE = """\
+name: standalone_step_agent
+globals:
+  agent:
+    name: GlobalAgent
+    description: Global description
+    systemPrompt: |
+      You are a global assistant.
+    connectors:
+      - type: registry
+        name: global_tool
+evals:
+  - name: switch_mid_context
+    agent:
+      name: CaseAgent
+    steps:
+      - name: first
+        message:
+          message:
+            parts:
+              - kind: text
+                text: hello
+      - name: second
+        agent:
+          name: StepAgent
+          description: Step-level agent
+        message:
+          message:
+            parts:
+              - kind: text
+                text: switch
+"""
+
+
+def test_step_agent_is_standalone_not_merged_with_globals(tmp_path: Path) -> None:
+    (case,) = load_suite(_write_suite(tmp_path, STEP_AGENT_STANDALONE)).cases
+    assert case.steps[0].agent is None
+    step_agent = case.steps[1].agent
+    assert step_agent is not None
+    assert step_agent.name == "StepAgent"
+    assert step_agent.description == "Step-level agent"
+    assert step_agent.system_prompt is None
+    assert step_agent.connectors == []
+
+
+STEP_USE_CONNECTOR = """\
+name: step_connector_targeting
+globals:
+  agent:
+    name: Orchestrator
+    connectors:
+      - type: registry
+        name: research
+evals:
+  - name: target_connector_on_step
+    agent:
+      name: Orchestrator
+    steps:
+      - name: via_orchestrator
+        message:
+          message:
+            parts:
+              - kind: text
+                text: hello
+      - name: via_connector
+        agent:
+          name: Orchestrator
+          connectors:
+            - type: registry
+              name: research
+        use_connector_name: research
+        message:
+          message:
+            parts:
+              - kind: text
+                text: direct
+"""
+
+
+def test_step_parses_use_connector_name(tmp_path: Path) -> None:
+    (case,) = load_suite(_write_suite(tmp_path, STEP_USE_CONNECTOR)).cases
+    assert case.steps[0].use_connector_name is None
+    assert case.steps[1].use_connector_name == "research"

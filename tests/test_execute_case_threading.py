@@ -25,13 +25,17 @@ class _ScriptedClient:
 
     def __init__(self, responses: list[dict[str, Any]]) -> None:
         self._responses = responses
+        self._counter = 0
         self.sent: list[dict[str, Any]] = []
+        self.sent_agent_ids: list[str] = []
 
     def create_agent(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return {"id": "agent-1"}
+        self._counter += 1
+        return {"id": f"agent-{self._counter}"}
 
     def send_message(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.sent.append(payload)
+        self.sent_agent_ids.append(agent_id)
         return self._responses[len(self.sent) - 1]
 
     def clone(self) -> "_ScriptedClient":
@@ -41,13 +45,18 @@ class _ScriptedClient:
         pass
 
 
-def _step(name: str, expectations: dict[str, Any] | None = None) -> Step:
+def _step(
+    name: str,
+    expectations: dict[str, Any] | None = None,
+    agent: Agent | None = None,
+) -> Step:
     return Step(
         message=MessagePayload.from_dict(
             {"message": {"parts": [{"kind": "text", "text": name}]}}
         ),
         expectations=parse_expectations(expectations),
         name=name,
+        agent=agent,
     )
 
 
@@ -176,3 +185,26 @@ def test_transport_exception_aborts_with_typed_harness_failure() -> None:
     assert aborted.results == []
     assert aborted.harness_error is not None
     assert aborted.harness_error.code is ErrorCode.NETWORK_ERROR
+
+
+def test_step_agent_id_carries_override_when_step_has_agent() -> None:
+    case = EvaluationCase(
+        name="switch",
+        agent=Agent(name="CaseAgent"),
+        steps=[
+            _step("first"),
+            _step("second", agent=Agent(name="StepAgent")),
+        ],
+    )
+    client = _ScriptedClient(
+        [{"task": {"status": {"state": "completed"}}}] * 2
+    )
+    pool = AgentPool()
+    pool.provision([case], client)
+
+    result = execute_case(case, client, pool)
+
+    assert result.agent_id == "agent-1"
+    assert result.step_results[0].agent_id == "agent-1"
+    assert result.step_results[1].agent_id == "agent-2"
+    assert client.sent_agent_ids == ["agent-1", "agent-2"]

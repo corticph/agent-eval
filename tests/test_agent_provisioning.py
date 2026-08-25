@@ -345,3 +345,99 @@ def test_sequential_case_reuses_one_agent_across_all_turns() -> None:
     assert client.create_count == 1
     assert client.sent_to == ["agent-1", "agent-1", "agent-1"]
     assert results[0].agent_id == "agent-1"
+
+
+def test_step_agent_override_is_provisioned_and_messaged() -> None:
+    client = _RecordingClient()
+    case = EvaluationCase(
+        name="switch",
+        agent=_agent("CaseAgent"),
+        steps=[
+            Step(name="first", message=_message("hello")),
+            Step(name="second", message=_message("switch"), agent=_agent("StepAgent")),
+        ],
+    )
+
+    results = run_suite(_suite([case]), client)
+
+    assert client.create_count == 2
+    assert client.sent_to == ["agent-1", "agent-2"]
+    assert results[0].agent_id == "agent-1"
+
+
+def test_two_steps_with_identical_agent_share_one_provisioning() -> None:
+    client = _RecordingClient()
+    step_agent = _agent("SharedStepAgent")
+    case = EvaluationCase(
+        name="dedup",
+        agent=_agent("CaseAgent"),
+        steps=[
+            Step(name="first", message=_message("hello")),
+            Step(name="second", message=_message("a"), agent=step_agent),
+            Step(name="third", message=_message("b"), agent=step_agent),
+        ],
+    )
+
+    run_suite(_suite([case]), client)
+
+    assert client.create_count == 2
+    assert client.sent_to == ["agent-1", "agent-2", "agent-2"]
+
+
+def test_step_use_connector_name_targets_and_dedups() -> None:
+    spec = _agent(
+        "Orchestrator",
+        connectors=[
+            {"type": "registry", "name": "research"},
+            {"type": "registry", "name": "writing"},
+        ],
+    )
+    client = _RecordingClient()
+    case = EvaluationCase(
+        name="connector_targeting",
+        agent=_agent("CaseAgent"),
+        steps=[
+            Step(
+                name="research_a",
+                message=_message("a"),
+                agent=spec,
+                use_connector_name="research",
+            ),
+            Step(
+                name="research_b",
+                message=_message("b"),
+                agent=spec,
+                use_connector_name="research",
+            ),
+            Step(
+                name="writing",
+                message=_message("c"),
+                agent=spec,
+                use_connector_name="writing",
+            ),
+        ],
+    )
+
+    run_suite(_suite([case]), client)
+
+    assert client.create_count == 3
+    assert client.sent_to[0] == client.sent_to[1]
+    assert client.sent_to[2] != client.sent_to[0]
+
+
+def test_step_agent_and_case_agent_with_same_spec_dedup() -> None:
+    shared_spec = _agent("SameSpec")
+    client = _RecordingClient()
+    case = EvaluationCase(
+        name="same_spec",
+        agent=shared_spec,
+        steps=[
+            Step(name="first", message=_message("a")),
+            Step(name="second", message=_message("b"), agent=shared_spec),
+        ],
+    )
+
+    run_suite(_suite([case]), client)
+
+    assert client.create_count == 1
+    assert client.sent_to == ["agent-1", "agent-1"]
