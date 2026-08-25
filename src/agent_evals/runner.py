@@ -311,6 +311,9 @@ def execute_case(
 
         for step in case.steps:
             _check_cancelled(stop_event)
+            step_agent_id = agent_id
+            if step.agent is not None:
+                step_agent_id = pool.agent_id_for_step(step)
             if step.delay_before_seconds is not None and step.delay_before_seconds > 0:
                 _LOGGER.debug(
                     "Sleeping %.3f seconds before step %s",
@@ -325,7 +328,7 @@ def execute_case(
             _check_cancelled(stop_event)
             request = step.message.prepare(current_context_id, current_task_id)
             step_start = time.perf_counter()
-            raw_response = client.send_message(agent_id, request.to_dict())
+            raw_response = client.send_message(step_agent_id, request.to_dict())
             response = Response.from_dict(raw_response)
             step_duration = time.perf_counter() - step_start
 

@@ -7,7 +7,7 @@ import logging
 from typing import Any, Iterable
 
 from .client import AgentClient
-from .loader import EvaluationCase
+from .loader import EvaluationCase, Step
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -150,6 +150,13 @@ def _create_agent_for_case(client: AgentClient, case: EvaluationCase) -> str:
     return agent_id
 
 
+def _create_agent_for_step(client: AgentClient, step: Step) -> str:
+    """Create the agent a step declares as a per-step override."""
+    agent_id = provision_agent(client, step.agent.to_dict(), None)
+    _LOGGER.debug("Created agent %s for step %s", agent_id, step.name)
+    return agent_id
+
+
 class AgentPool:
     """A run's ``key -> agent_id`` map.
 
@@ -174,6 +181,10 @@ class AgentPool:
             sort_keys=True,
         )
 
+    @staticmethod
+    def _step_key(step: Step) -> str:
+        return json.dumps({"agent": step.agent.to_dict()}, sort_keys=True)
+
     def provision(self, cases: Iterable[EvaluationCase], client: AgentClient) -> None:
         """Create every unique agent the suite needs, before any case runs.
 
@@ -181,15 +192,23 @@ class AgentPool:
         spec surfaces up front rather than as a wall of per-case errors.
         """
         for case in cases:
-            if case.agent_id_override:
-                continue  # the override *is* the id; nothing to create
-            key = self._key(case)
-            if key in self._by_key:
-                continue
-            self._by_key[key] = _create_agent_for_case(client, case)
+            if not case.agent_id_override:
+                key = self._key(case)
+                if key not in self._by_key:
+                    self._by_key[key] = _create_agent_for_case(client, case)
+            for step in case.steps:
+                if step.agent is None:
+                    continue
+                step_key = self._step_key(step)
+                if step_key not in self._by_key:
+                    self._by_key[step_key] = _create_agent_for_step(client, step)
 
     def agent_id_for(self, case: EvaluationCase) -> str:
         """Return the provisioned (or overridden) agent id for a case."""
         if case.agent_id_override:
             return case.agent_id_override
         return self._by_key[self._key(case)]
+
+    def agent_id_for_step(self, step: Step) -> str:
+        """Return the provisioned agent id for a step-level agent override."""
+        return self._by_key[self._step_key(step)]

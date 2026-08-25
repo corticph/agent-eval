@@ -57,6 +57,7 @@ class Step:
     expectations: list[Expectation] = field(default_factory=list)
     delay_before_seconds: float | None = None
     name: str | None = None
+    agent: Agent | None = None
 
     @classmethod
     def from_dict(
@@ -65,6 +66,7 @@ class Step:
         *,
         base_variables: dict[str, str],
         message_defaults: dict[str, Any] | None = None,
+        agent_defaults: dict[str, Any] | None = None,
     ) -> "Step":
         # A step in a ``steps:`` list must name itself, so the Step Trail is legible.
         if "name" not in data:
@@ -78,11 +80,20 @@ class Step:
             if "delay_before_seconds" in data
             else None
         )
+        step_agent: Agent | None = None
+        if "agent" in data and data["agent"] is not None:
+            step_agent = _merge_agent(
+                agent_defaults or {},
+                data["agent"],
+                variables=step_variables,
+                case_name=data["name"],
+            )
         return cls(
             message=message,
             expectations=expectations,
             delay_before_seconds=delay_before_seconds,
             name=data["name"],
+            agent=step_agent,
         )
 
 
@@ -117,6 +128,7 @@ class EvaluationCase:
             data,
             base_variables=base_variables,
             message_defaults=message_defaults,
+            agent_defaults=agent_defaults,
             case_name=name or "<unnamed>",
         )
         if not name:
@@ -214,6 +226,7 @@ def _normalize_steps(
     *,
     base_variables: dict[str, str],
     message_defaults: dict[str, Any] | None,
+    agent_defaults: dict[str, Any] | None,
     case_name: str,
 ) -> list[Step]:
     """Collapse both authoring shapes into an ordered ``list[Step]`` (length ≥ 1).
@@ -231,6 +244,7 @@ def _normalize_steps(
                 step_data,
                 base_variables=base_variables,
                 message_defaults=message_defaults,
+                agent_defaults=agent_defaults,
             )
             for step_data in raw_steps
         ]
