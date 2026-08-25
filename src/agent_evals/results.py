@@ -153,6 +153,9 @@ class StepResult:
     # The conversation identifier (Opik threads are keyed by it) — stamped once
     # by execution; there is no separate trace id.
     context_id: str | None = None
+    # The agent that handled this step — the step override's id when present,
+    # otherwise the case-level agent's id. Per-step attribution.
+    agent_id: str | None = None
     usage: UsageMetrics | None = None
     # The per-term ``ExpectationResult`` list — the source of truth both sinks
     # render from, judge included (as a ``show_on_pass`` result). Supersedes the
@@ -170,6 +173,7 @@ class StepResult:
             else None,
             "duration_seconds": self.duration_seconds,
             "context_id": self.context_id,
+            "agent_id": self.agent_id,
             "usage": self.usage.as_dict() if self.usage else None,
             "expectation_results": [result.to_dict() for result in self.results],
         }

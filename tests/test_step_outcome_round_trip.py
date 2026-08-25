@@ -93,3 +93,15 @@ class TestStepResultHarnessErrorSerialization:
         ).as_dict()
         assert payload["harness_error"] is None
         assert "errors" not in payload
+
+
+class TestStepResultAgentIdSerialization:
+    def test_agent_id_serializes(self) -> None:
+        step = StepResult(
+            name="s", success=True, request=None, response=None, agent_id="agent-42"
+        )
+        assert step.as_dict()["agent_id"] == "agent-42"
+
+    def test_agent_id_defaults_to_none(self) -> None:
+        step = StepResult(name="s", success=True, request=None, response=None)
+        assert step.as_dict()["agent_id"] is None

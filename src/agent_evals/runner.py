@@ -387,6 +387,7 @@ def execute_case(
                     response=response,
                     duration_seconds=step_duration,
                     context_id=context_candidate,
+                    agent_id=step_agent_id,
                     usage=UsageMetrics.from_response(raw_response),
                     results=results,
                 )

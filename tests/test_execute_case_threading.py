@@ -176,3 +176,87 @@ def test_transport_exception_aborts_with_typed_harness_failure() -> None:
     assert aborted.results == []
     assert aborted.harness_error is not None
     assert aborted.harness_error.code is ErrorCode.NETWORK_ERROR
+
+
+# ---------------------------------------------------------------------------
+# Per-step agent attribution (AGENT-986 Q2)
+# ---------------------------------------------------------------------------
+
+class _MultiAgentClient:
+    """Returns incrementing agent ids and records which agent each send hit."""
+
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self._responses = responses
+        self._counter = 0
+        self.sent_agent_ids: list[str] = []
+
+    def create_agent(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._counter += 1
+        return {"id": f"agent-{self._counter}"}
+
+    def send_message(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.sent_agent_ids.append(agent_id)
+        return self._responses[len(self.sent_agent_ids) - 1]
+
+    def clone(self) -> "_MultiAgentClient":
+        return self
+
+    def close(self) -> None:
+        pass
+
+
+def _msg(text: str) -> MessagePayload:
+    return MessagePayload.from_dict(
+        {"message": {"parts": [{"kind": "text", "text": text}]}}
+    )
+
+
+def test_step_agent_id_carries_override_when_step_has_agent() -> None:
+    """A step with its own agent stamps that agent's id on its StepResult."""
+    case = EvaluationCase(
+        name="switch",
+        agent=Agent(name="CaseAgent"),
+        steps=[
+            Step(name="first", message=_msg("hello")),
+            Step(
+                name="second",
+                message=_msg("switch"),
+                agent=Agent(name="StepAgent"),
+            ),
+        ],
+    )
+    client = _MultiAgentClient(
+        [{"task": {"status": {"state": "completed"}}}] * 2
+    )
+    pool = AgentPool()
+    pool.provision([case], client)
+
+    result = execute_case(case, client, pool)
+
+    assert result.agent_id == "agent-1"  # case-level default
+    assert result.step_results[0].agent_id == "agent-1"  # case agent
+    assert result.step_results[1].agent_id == "agent-2"  # step override
+    assert client.sent_agent_ids == ["agent-1", "agent-2"]
+
+
+def test_step_agent_id_carries_case_agent_when_no_override() -> None:
+    """Steps without an agent override carry the case-level agent's id."""
+    case = EvaluationCase(
+        name="no_switch",
+        agent=Agent(name="CaseAgent"),
+        steps=[
+            Step(name="first", message=_msg("hello")),
+            Step(name="second", message=_msg("more")),
+        ],
+    )
+    client = _MultiAgentClient(
+        [{"task": {"status": {"state": "completed"}}}] * 2
+    )
+    pool = AgentPool()
+    pool.provision([case], client)
+
+    result = execute_case(case, client, pool)
+
+    assert result.agent_id == "agent-1"
+    assert all(sr.agent_id == "agent-1" for sr in result.step_results)
+    assert client.sent_agent_ids == ["agent-1", "agent-1"]
