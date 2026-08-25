@@ -252,7 +252,9 @@ def _run_case_with_timeout(
     return result_box[0]
 
 
-def _harness_failure_step(error: EvalError) -> StepResult:
+def _harness_failure_step(
+    error: EvalError, agent_id: str | None = None
+) -> StepResult:
     """A synthetic Step Trail entry for a failure that never reached a send.
 
     A timeout or a failure before the request was built has no Step of its own,
@@ -265,6 +267,7 @@ def _harness_failure_step(error: EvalError) -> StepResult:
         request=None,
         response=None,
         harness_error=error,
+        agent_id=agent_id,
     )
 
 
@@ -409,7 +412,9 @@ def execute_case(
     except Exception as exc:  # pragma: no cover - defensive logging
         _LOGGER.exception("Evaluation %s raised an exception", case.name)
         duration = time.perf_counter() - start
-        step_results.append(_harness_failure_step(EvalError.from_exception(exc)))
+        step_results.append(_harness_failure_step(
+            EvalError.from_exception(exc), agent_id=agent_id
+        ))
         return EvaluationResult(
             name=case.name,
             success=False,
