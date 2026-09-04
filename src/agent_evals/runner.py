@@ -17,6 +17,8 @@ from .expectations import (
     ExpectedState,
     evaluate_response,
 )
+from .expectations.base import extract_plain_text
+from .expectations.state import normalize_task_state
 from .loader import EvaluationCase, EvaluationSuite, SuiteOptions
 from .provisioning import AgentPool
 from .reporting.trace import build_trace_url
@@ -96,7 +98,10 @@ def run_suite(
                         sink.write(case, result)
     finally:
         for sink in started:
-            sink.close()
+            try:
+                sink.close()
+            except Exception:
+                _LOGGER.exception("Sink %s failed during close", type(sink).__name__)
     return results
 
 
@@ -359,6 +364,16 @@ def execute_case(
                 trace=trace_data,
                 trace_url=trace_url,
             )
+
+            normalized_state = normalize_task_state(response.state)
+            if normalized_state == "REJECTED":
+                response_text = extract_plain_text(raw_response)
+                _LOGGER.error(
+                    "AGENT REJECTED task in eval %s (step %s): %s",
+                    case.name,
+                    step.name or "(unnamed)",
+                    response_text or response.state or "(no message)",
+                )
 
             # Threading is polymorphic: a step carries its taskId forward iff one
             # of its expectations says so (only ``expected_state: input-required``

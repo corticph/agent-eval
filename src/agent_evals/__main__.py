@@ -11,7 +11,7 @@ from typing import Callable, Sequence
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 from .client import AgentClient
 from .environment import (

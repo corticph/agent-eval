@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import fields
 from typing import Any
 
@@ -21,11 +22,14 @@ from opik.evaluation.metrics import base_metric, score_result
 
 from ..environment import OPIK_URL_OVERRIDE_VAR, Environment
 from ..expectations import (
+    ExpectedState,
     Expectation,
     ExpectationResult,
     parse_expectations,
     registry,
 )
+from ..expectations.base import extract_plain_text
+from ..expectations.state import normalize_task_state
 from ..loader import EvaluationCase, EvaluationSuite, Step
 from ..results import EvaluationResult
 from ..schemas.agent import Agent
@@ -33,6 +37,9 @@ from .opik_target import resolve_opik_url
 from .trace import build_trace_url
 
 _LOGGER = logging.getLogger(__name__)
+
+_OPIK_CLOSE_MAX_RETRIES = 3
+_OPIK_CLOSE_RETRY_BACKOFF = 2.0
 
 # The project agent-api logs its traces to (the Environment carries its id per
 # environment for trace links); keeping evals in the same project keeps the
@@ -134,6 +141,11 @@ def _build_task_output(
             "success": step.success,
             "expectation_results": [r.to_dict() for r in step.results],
             "duration_seconds": step.duration_seconds,
+            "response_state": step.response.state if step.response else None,
+            "response_text": extract_plain_text(
+                step.response.to_dict() if step.response else None
+            )
+            or None,
         }
         trail.append(entry)
 
@@ -350,11 +362,22 @@ class ExpectationMetric(base_metric.BaseMetric):
 
         # A Harness Failure is the case-level ``error``, never a trail row, so a
         # trail entry only ever carries failed *checks* — the per-step reason is
-        # built from those alone.
+        # built from those alone.  A REJECTED state is surfaced explicitly so
+        # the agent's rejection message (e.g. "insufficient credits") is visible
+        # in the Opik experiment's score reasons.
         reasons: list[str] = []
         if error:
             reasons.append(_task_failed(error))
         for entry in step_results:
+            state = entry.get("response_state")
+            if normalize_task_state(state) == "REJECTED":
+                text = entry.get("response_text") or ""
+                step_name = entry.get("name") or _UNNAMED_STEP_KEY
+                reasons.append(
+                    f"{step_name}: AGENT REJECTED — {text}"
+                    if text
+                    else f"{step_name}: AGENT REJECTED"
+                )
             for result in entry.get("expectation_results") or []:
                 reasons.extend(
                     f"{entry.get('name') or _UNNAMED_STEP_KEY}: {check['detail']}"
@@ -463,10 +486,26 @@ class OpikSink:
         """
         if self._suite is None or self._opik_client is None:
             return  # on_start never ran (a later sink's on_start failed first)
-        # Rebuild every run: clear stale/renamed items first, then mirror exactly
-        # what executed. A run that executed nothing (aborted before the first
-        # Case, or fully filtered out) leaves a cleared dataset and no
-        # experiment — ``evaluate()`` on an empty dataset would only error.
+
+        for attempt in range(1, _OPIK_CLOSE_MAX_RETRIES + 1):
+            try:
+                self._close_attempt()
+                return
+            except Exception:
+                if attempt == _OPIK_CLOSE_MAX_RETRIES:
+                    raise
+                wait = _OPIK_CLOSE_RETRY_BACKOFF * attempt
+                _LOGGER.warning(
+                    "Opik close failed (attempt %d/%d), retrying in %.1fs",
+                    attempt,
+                    _OPIK_CLOSE_MAX_RETRIES,
+                    wait,
+                    exc_info=True,
+                )
+                time.sleep(wait)
+
+    def _close_attempt(self) -> None:
+        """One attempt at the full close: clear, insert, evaluate, log scores."""
         items = [_case_to_dataset_item(case) for case, _ in self._entries]
         self._dataset.clear()
         if not items:
@@ -478,29 +517,119 @@ class OpikSink:
         environment_name = self._environment.name
 
         def task(item: dict[str, Any]) -> dict[str, Any]:
-            # A no-network lookup: the result the runner already produced,
-            # keyed by the Case name the dataset item carries.
             return _build_task_output(
                 by_name[item["name"]],
                 trace_base_url=trace_base_url,
                 environment=environment_name,
             )
 
-        evaluate(
+        eval_result = evaluate(
             dataset=self._dataset,
             task=task,
             scoring_metrics=[ExpectationMetric()],
             experiment_name=self._experiment_name_override or self._suite.name,
-            # The target environment is run-level metadata read from the single
-            # authoritative source (the Environment), so two runs of the same
-            # suite against different deployments can be told apart in the
-            # Experiments table.
             experiment_config={
                 "suite": self._suite.name,
                 "environment": environment_name,
             },
             experiment_tags=self._experiment_tags,
         )
+
+        if eval_result is not None:
+            self._log_rejection_feedback_scores(eval_result, by_name)
+            self._log_usage_scores(eval_result)
+
+    def _log_rejection_feedback_scores(
+        self,
+        eval_result: Any,
+        by_name: dict[str, EvaluationResult],
+    ) -> None:
+        """Log a feedback score for every case the agent REJECTED.
+
+        The score is 1.0 when the eval expected the rejection (the step declared
+        ``expected_state: rejected`` and the check passed) and 0.0 when it was
+        unexpected.  The agent's rejection message (e.g. "insufficient credits")
+        rides in the score's ``reason`` field so it is visible in the Opik
+        experiment's feedback scores panel.
+        """
+        scores: list[dict[str, Any]] = []
+        for test_result in eval_result.test_results:
+            case_result = by_name.get(test_result.test_case.dataset_item_content.get("name"))
+            if case_result is None:
+                continue
+            for step in case_result.step_results:
+                if step.response is None:
+                    continue
+                if normalize_task_state(step.response.state) != "REJECTED":
+                    continue
+                text = extract_plain_text(step.response.to_dict()) or ""
+                expected_state_result = next(
+                    (r for r in step.results if r.key == ExpectedState.key),
+                    None,
+                )
+                rejected_was_expected = (
+                    expected_state_result is not None
+                    and expected_state_result.passed
+                )
+                scores.append(
+                    {
+                        "id": test_result.test_case.trace_id,
+                        "name": "agent_rejected",
+                        "value": 1.0 if rejected_was_expected else 0.0,
+                        "category_name": "REJECTED",
+                        "reason": text or step.response.state or "agent rejected task",
+                    }
+                )
+                break
+        if scores:
+            self._opik_client.log_traces_feedback_scores(scores=scores)
+
+    def _log_usage_scores(self, eval_result: Any) -> None:
+        """Log aggregate usage (credits, tokens) as experiment-level feedback scores.
+
+        Sums ``credits``, ``input_tokens``, and ``output_tokens`` across every
+        case's steps and logs each as an experiment score so the estimated cost
+        is visible in the Opik experiment's feedback scores panel.
+        """
+        total_credits: float | None = None
+        total_input: int | None = None
+        total_output: int | None = None
+        for _, result in self._entries:
+            usage = result.aggregate_usage()
+            if usage is None:
+                continue
+            if usage.credits is not None:
+                total_credits = (total_credits or 0) + usage.credits
+            if usage.input_tokens is not None:
+                total_input = (total_input or 0) + usage.input_tokens
+            if usage.output_tokens is not None:
+                total_output = (total_output or 0) + usage.output_tokens
+
+        scores: list[score_result.ScoreResult] = []
+        if total_credits is not None:
+            scores.append(
+                score_result.ScoreResult(name="estimated_cost", value=total_credits)
+            )
+        if total_input is not None:
+            scores.append(
+                score_result.ScoreResult(name="total_input_tokens", value=total_input)
+            )
+        if total_output is not None:
+            scores.append(
+                score_result.ScoreResult(name="total_output_tokens", value=total_output)
+            )
+        if not scores:
+            return
+
+        try:
+            experiment = self._opik_client.get_experiment_by_id(
+                eval_result.experiment_id
+            )
+            experiment.log_experiment_scores(scores)
+        except Exception:
+            _LOGGER.warning(
+                "Failed to log usage scores to Opik experiment", exc_info=True
+            )
 
     def aggregate_runs(self) -> None:
         """No-op — cross-run aggregation is not needed for Opik experiments."""
