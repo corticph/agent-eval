@@ -54,6 +54,8 @@ Key flags:
 - `--tag`: tag all Opik experiments in the sweep (repeatable, forwarded to `--opik`)
 - `-j / --jobs`: max concurrent suites (default 3, use 1 for sequential)
 - `--retries`: retry failed suites N times (default 2; the kubectl tunnel drops connections under load but recovers fast)
+- `--resume`: re-run only suites that failed in the last sweep for this env; reads `runs/failed_<env>.txt` (written automatically after every sweep)
+- `--resume-file <path>`: resume from an explicit failed-suites file instead of the default
 - Extra args after the flags are forwarded to `agent-evals run` (e.g. `-v`, `--runs 3`)
 
 > **Parallel sweeps share the Opik tunnel.** The first sweep to finish will
@@ -62,6 +64,28 @@ Key flags:
 
 The script pre-warms the kubectl tunnel to Opik before launching suites. All
 runs include `--opik` so results land in Opik automatically.
+
+### Resuming failed suites
+
+After every sweep, the script writes the list of failed suite paths to
+`runs/failed_<env>.txt` (gitignored). Use `--resume` to re-run only those
+suites on the next invocation — the file is updated with whatever still
+fails, so you can repeat until all pass.
+
+```bash
+# First sweep: some suites fail (rate-limiting, tunnel drops, etc.)
+bash run_all_evals.sh --env eu --tag "eu-$(date +%Y%m%d-%H%M%S)"
+
+# Resume only the failed suites (same env, same tag for Opik grouping)
+bash run_all_evals.sh --env eu --tag "eu-20260907-120000" --resume
+
+# Repeat until "Nothing to resume"
+bash run_all_evals.sh --env eu --tag "eu-20260907-120000" --resume
+```
+
+When all suites pass, the failed file is emptied and a subsequent `--resume`
+prints "Nothing to resume" and exits 0. Use `--resume-file <path>` to resume
+from an explicit file instead of the per-env default.
 
 ## 2. Comparing experiments
 

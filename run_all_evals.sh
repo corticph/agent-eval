@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  echo "Usage: $0 --env <environment> [--evals-dir <path>] [--suite <pattern>] [--tag <tag>] [-j <jobs>] [extra agent-evals args...]"
+  echo "Usage: $0 --env <environment> [--evals-dir <path>] [--suite <pattern>] [--tag <tag>] [-j <jobs>] [--resume | --resume-file <path>] [extra agent-evals args...]"
   echo ""
   echo "Runs every suite under evals/ against the given environment."
   echo ""
@@ -23,12 +23,21 @@ usage() {
   echo "  --retries    Retry failed suites N times (default: 2). The kubectl"
   echo "               tunnel drops connections under load but recovers fast."
   echo "               Set to 0 to disable retries."
+  echo "  --resume     Re-run only suites that failed in the last sweep for this"
+  echo "               environment. Reads runs/failed_<env>.txt (written"
+  echo "               automatically after every sweep). When the file is empty"
+  echo "               or missing, prints 'nothing to resume' and exits 0."
+  echo "  --resume-file <path>"
+  echo "               Resume from an explicit failed-suites file instead of"
+  echo "               the default runs/failed_<env>.txt. One suite path per line."
+  echo "               Lines starting with # are ignored."
   echo ""
   echo "Example:"
   echo "  $0 --env eu -v"
   echo "  $0 --env dev-weu --suite smoke"
   echo "  $0 --env local --suite smoke --tag release-v1.2"
   echo "  $0 --env eu --suite smoke -j 8"
+  echo "  $0 --env eu --tag eu-20260907-120000 --resume"
   exit 1
 }
 
@@ -38,6 +47,8 @@ SUITE_FILTERS=()
 TAGS=()
 JOBS=3
 RETRIES=2
+RESUME=false
+RESUME_FILE=""
 
 # Parse environment parameter
 while [[ $# -gt 0 ]]; do
@@ -114,6 +125,24 @@ while [[ $# -gt 0 ]]; do
       RETRIES="${1#*=}"
       shift
       ;;
+    --resume)
+      RESUME=true
+      shift
+      ;;
+    --resume-file)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --resume-file requires a value"
+        usage
+      fi
+      RESUME=true
+      RESUME_FILE="$2"
+      shift 2
+      ;;
+    --resume-file=*)
+      RESUME=true
+      RESUME_FILE="${1#*=}"
+      shift
+      ;;
     *)
       break
       ;;
@@ -147,72 +176,121 @@ fi
 
 echo "Running evals for environment: ${ENVIRONMENT}"
 
-# Locate the evals directory: explicit --evals-dir wins, then a local evals/,
-# then a sibling agent-eval-cases/evals/ checkout.
-if [[ -n "${EVALS_DIR_ARG}" ]]; then
-  if [[ ! -d "${EVALS_DIR_ARG}" ]]; then
-    echo "Error: --evals-dir '${EVALS_DIR_ARG}' does not exist or is not a directory."
+# --- state directory for resume -------------------------------------------------
+# runs/ holds failed-suite lists so the next invocation can --resume only the
+# suites that failed.  It's gitignored; one file per environment.
+RUNS_DIR="${ROOT_DIR}/runs"
+FAILED_FILE="${RUNS_DIR}/failed_${ENVIRONMENT}.txt"
+if [[ -n "${RESUME_FILE}" ]]; then
+  FAILED_FILE="${RESUME_FILE}"
+fi
+mkdir -p "${RUNS_DIR}"
+
+# --- build the suite list (resume or discover) --------------------------------
+#
+# With --resume, the list comes from a previously-written failed-suites file
+# (one path per line, # comments ignored).  Without --resume, suites are
+# discovered recursively under the evals directory and optionally filtered
+# by --suite.
+
+if [[ "${RESUME}" == true ]]; then
+  if [[ ! -f "${FAILED_FILE}" ]]; then
+    echo "Nothing to resume: ${FAILED_FILE} does not exist (all suites passed in the last sweep, or no sweep has been run yet)."
+    exit 0
+  fi
+
+  # Read non-comment, non-empty lines into all_suites.
+  all_suites=()
+  while IFS= read -r line; do
+    # Strip leading/trailing whitespace.
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "${line}" ]] && continue
+    [[ "${line}" == \#* ]] && continue
+    if [[ ! -f "${line}" ]]; then
+      echo "Warning: suite file '${line}' from ${FAILED_FILE} no longer exists; skipping."
+      continue
+    fi
+    all_suites+=("${line}")
+  done < "${FAILED_FILE}"
+
+  if [[ ${#all_suites[@]} -eq 0 ]]; then
+    echo "Nothing to resume: ${FAILED_FILE} contains no suite paths (all suites passed in the last sweep)."
+    # Clean up the empty file so a future --resume without a new run also exits cleanly.
+    rm -f "${FAILED_FILE}"
+    exit 0
+  fi
+
+  echo "Resuming ${#all_suites[@]} failed suite(s) from ${FAILED_FILE}"
+else
+  # Locate the evals directory: explicit --evals-dir wins, then a local evals/,
+  # then a sibling agent-eval-cases/evals/ checkout.
+  if [[ -n "${EVALS_DIR_ARG}" ]]; then
+    if [[ ! -d "${EVALS_DIR_ARG}" ]]; then
+      echo "Error: --evals-dir '${EVALS_DIR_ARG}' does not exist or is not a directory."
+      exit 1
+    fi
+    EVALS_DIR="${EVALS_DIR_ARG}"
+  elif [[ -d "${ROOT_DIR}/evals" ]]; then
+    EVALS_DIR="${ROOT_DIR}/evals"
+  elif [[ -d "${ROOT_DIR}/../agent-eval-cases/evals" ]]; then
+    EVALS_DIR="${ROOT_DIR}/../agent-eval-cases/evals"
+  else
+    echo "Error: No evals/ directory found."
+    echo ""
+    echo "This repo is the eval harness only — the suite YAML, expectations, and"
+    echo "fixtures live in a separate cases repo.  To get started:"
+    echo ""
+    echo "  1. Clone the cases repo as a sibling:"
+    echo "       git clone <cases-repo-url> ../agent-eval-cases"
+    echo ""
+    echo "  2. Or symlink its evals/ into this repo:"
+    echo "       ln -s /path/to/agent-eval-cases/evals evals"
+    echo ""
+    echo "  3. Or point --evals-dir at any directory of suite YAML files:"
+    echo "       $0 --env local --evals-dir /path/to/evals"
+    echo ""
     exit 1
   fi
-  EVALS_DIR="${EVALS_DIR_ARG}"
-elif [[ -d "${ROOT_DIR}/evals" ]]; then
-  EVALS_DIR="${ROOT_DIR}/evals"
-elif [[ -d "${ROOT_DIR}/../agent-eval-cases/evals" ]]; then
-  EVALS_DIR="${ROOT_DIR}/../agent-eval-cases/evals"
-else
-  echo "Error: No evals/ directory found."
-  echo ""
-  echo "This repo is the eval harness only — the suite YAML, expectations, and"
-  echo "fixtures live in a separate cases repo.  To get started:"
-  echo ""
-  echo "  1. Clone the cases repo as a sibling:"
-  echo "       git clone <cases-repo-url> ../agent-eval-cases"
-  echo ""
-  echo "  2. Or symlink its evals/ into this repo:"
-  echo "       ln -s /path/to/agent-eval-cases/evals evals"
-  echo ""
-  echo "  3. Or point --evals-dir at any directory of suite YAML files:"
-  echo "       $0 --env local --evals-dir /path/to/evals"
-  echo ""
-  exit 1
-fi
 
-SEARCH_DIRS=("${EVALS_DIR}")
+  SEARCH_DIRS=("${EVALS_DIR}")
 
-# Discover all suite YAML files recursively, excluding *_local.yaml variants.
-# (Portable read loop instead of `mapfile`, which macOS's bash 3.2 lacks.)
-all_suites=()
-while IFS= read -r suite_line; do
-  all_suites+=("${suite_line}")
-done < <(find "${SEARCH_DIRS[@]}" -name '*.yaml' ! -name '_*.yaml' ! -name '*_local.yaml' -size +0c | sort)
+  # Discover all suite YAML files recursively, excluding *_local.yaml variants.
+  # (Portable read loop instead of `mapfile`, which macOS's bash 3.2 lacks.)
+  all_suites=()
+  while IFS= read -r suite_line; do
+    all_suites+=("${suite_line}")
+  done < <(find "${SEARCH_DIRS[@]}" -name '*.yaml' ! -name '_*.yaml' ! -name '*_local.yaml' -size +0c | sort)
 
-# Apply --suite substring filters if any were given.
-if ((${#SUITE_FILTERS[@]})); then
-  filtered_suites=()
-  for suite_path in "${all_suites[@]}"; do
-    for pattern in "${SUITE_FILTERS[@]}"; do
-      if [[ "${suite_path}" == *"${pattern}"* ]]; then
-        filtered_suites+=("${suite_path}")
-        break
-      fi
+  # Apply --suite substring filters if any were given.
+  if ((${#SUITE_FILTERS[@]})); then
+    filtered_suites=()
+    for suite_path in "${all_suites[@]}"; do
+      for pattern in "${SUITE_FILTERS[@]}"; do
+        if [[ "${suite_path}" == *"${pattern}"* ]]; then
+          filtered_suites+=("${suite_path}")
+          break
+        fi
+      done
     done
-  done
-  all_suites=("${filtered_suites[@]}")
-fi
+    all_suites=(${filtered_suites[@]+"${filtered_suites[@]}"})
+  fi
 
-if [[ ${#all_suites[@]} -eq 0 ]]; then
-  echo "Error: No suite files matched the --suite filter(s): ${SUITE_FILTERS[*]}"
-  exit 1
+  if [[ ${#all_suites[@]} -eq 0 ]]; then
+    echo "Error: No suite files matched the --suite filter(s): ${SUITE_FILTERS[*]}"
+    exit 1
+  fi
 fi
 
 extra_args=()
-for tag in "${TAGS[@]}"; do
+for tag in "${TAGS[@]+"${TAGS[@]}"}"; do
   extra_args+=(--tag "$tag")
 done
 if (($#)); then
   extra_args+=("$@")
 fi
 failed=0
+FAILED_SUITES=()
 
 # --- pre-warm the Opik tunnel -------------------------------------------------
 # When --opik is baked in (as this sweep does), every suite calls
@@ -281,26 +359,29 @@ run_one() {
 if ((JOBS <= 1)); then
   # Sequential: output in real time.
   for suite_path in "${all_suites[@]}"; do
-    rel_path="${suite_path#"${EVALS_DIR}"/}"
+    rel_path="${suite_path#"${EVALS_DIR:-}"/}"
     tmpfile="$(mktemp)"
     if run_one "$suite_path" "$tmpfile"; then rc=0; else rc=$?; fi
     cat "$tmpfile"
     rm -f "$tmpfile"
-    ((rc != 0)) && failed=1
+    if ((rc != 0)); then
+      failed=1
+      FAILED_SUITES+=("$suite_path")
+    fi
   done
 else
   # Parallel: launch up to JOBS suites, buffer output per-suite.
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
 
-  # running entries: "pid|rel_path|outfile"
+  # running entries: "pid|suite_path|rel_path|outfile"
   running=()
   total=${#all_suites[@]}
   done_count=0
   job_seq=0
 
   for suite_path in "${all_suites[@]}"; do
-    rel_path="${suite_path#"${EVALS_DIR}"/}"
+    rel_path="${suite_path#"${EVALS_DIR:-}"/}"
 
     # Wait for a free slot.
     while ((${#running[@]} >= JOBS)); do
@@ -309,6 +390,8 @@ else
       for entry in "${running[@]}"; do
         pid="${entry%%|*}"
         rest="${entry#*|}"
+        full_path="${rest%%|*}"
+        rest="${rest#*|}"
         rpath="${rest%%|*}"
         outfile="${rest#*|}"
         if kill -0 "$pid" 2>/dev/null; then
@@ -319,7 +402,10 @@ else
           echo "-- ${rpath} ${done_count}/${total} exit ${rc} --"
           cat "$outfile"
           rm -f "$outfile"
-          if ((rc != 0)); then failed=1; fi
+          if ((rc != 0)); then
+            failed=1
+            FAILED_SUITES+=("$full_path")
+          fi
         fi
       done
       if ((${#still_running[@]})); then
@@ -333,13 +419,15 @@ else
     outfile="${tmpdir}/job_${job_seq}.out"
     ( run_one "$suite_path" "$outfile" ) &
     pid=$!
-    running+=("${pid}|${rel_path}|${outfile}")
+    running+=("${pid}|${suite_path}|${rel_path}|${outfile}")
   done
 
   # Drain remaining jobs.
-  for entry in "${running[@]}"; do
+  for entry in "${running[@]+"${running[@]}"}"; do
     pid="${entry%%|*}"
     rest="${entry#*|}"
+    full_path="${rest%%|*}"
+    rest="${rest#*|}"
     rpath="${rest%%|*}"
     outfile="${rest#*|}"
     wait "$pid" && rc=0 || rc=$?
@@ -347,7 +435,10 @@ else
     echo "-- ${rpath} ${done_count}/${total} exit ${rc} --"
     cat "$outfile"
     rm -f "$outfile"
-    if ((rc != 0)); then failed=1; fi
+    if ((rc != 0)); then
+      failed=1
+      FAILED_SUITES+=("$full_path")
+    fi
   done
 fi
 
@@ -360,6 +451,18 @@ else
   echo "  all suites passed"
 fi
 echo "============================================================"
+
+# --- write failed-suites file for resume ---------------------------------------
+# Always (re)write the file: a non-empty list lets the next --resume pick up
+# the remaining failures; an empty file signals "all passed" so a subsequent
+# --resume exits cleanly.
+if (( ${#FAILED_SUITES[@]} )); then
+  printf '%s\n' "${FAILED_SUITES[@]}" > "${FAILED_FILE}"
+  echo "Failed suites written to ${FAILED_FILE}"
+  echo "Resume with: $0 --env ${ENVIRONMENT} --resume"
+else
+  : > "${FAILED_FILE}"
+fi
 
 # Clean up the tunnel we started (if any).
 # Only kill it if no other run_all_evals.sh processes are still running —

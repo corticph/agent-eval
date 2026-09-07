@@ -3,6 +3,7 @@ __pycache__/
 *.egg-info/
 .venv/
 results/
+runs/
 .env
 .DS_Store
 .vscode/
