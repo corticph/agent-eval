@@ -36,8 +36,11 @@ from .trace import build_trace_url
 
 _LOGGER = logging.getLogger(__name__)
 
-_OPIK_CLOSE_MAX_RETRIES = 3
+_OPIK_CLOSE_MAX_RETRIES = 5
 _OPIK_CLOSE_RETRY_BACKOFF = 2.0
+
+_DATASET_MAX_RETRIES = 5
+_DATASET_RETRY_BACKOFF = 2.0
 
 # The project agent-api logs its traces to (the Environment carries its id per
 # environment for trace links); keeping evals in the same project keeps the
@@ -441,9 +444,7 @@ class OpikSink:
             api_key=os.environ.get("OPIK_API_KEY"),
         )
         name = self._dataset_name_override or suite.name
-        dataset = self._opik_client.get_or_create_dataset(
-            name=name, project_name=project
-        )
+        dataset = self._get_or_create_dataset_with_retry(name, project)
         if dataset.project_name != project:
             # Datasets from before the project default stay pinned to the project
             # they were created in: the SDK resolves the *stored* project over the
@@ -459,6 +460,35 @@ class OpikSink:
             self._opik_client.delete_dataset(name=name)
             dataset = self._opik_client.create_dataset(name=name, project_name=project)
         self._dataset = dataset
+
+    def _get_or_create_dataset_with_retry(self, name: str, project: str) -> Any:
+        """Get-or-create the dataset, retrying on 409 races.
+
+        Parallel sweeps running the same suite share one dataset; two
+        ``get_or_create_dataset`` calls landing at once can both try to create
+        and the loser gets a 409. A brief wait + retry resolves it — by the
+        next attempt the winner's dataset exists and the call becomes a get.
+        """
+        for attempt in range(1, _DATASET_MAX_RETRIES + 1):
+            try:
+                return self._opik_client.get_or_create_dataset(
+                    name=name, project_name=project
+                )
+            except Exception:
+                if attempt == _DATASET_MAX_RETRIES:
+                    raise
+                wait = _DATASET_RETRY_BACKOFF * attempt
+                _LOGGER.warning(
+                    "Dataset %r get-or-create failed (attempt %d/%d), retrying in %.1fs",
+                    name,
+                    attempt,
+                    _DATASET_MAX_RETRIES,
+                    wait,
+                    exc_info=True,
+                )
+                time.sleep(wait)
+        # Unreachable, but satisfies the type checker.
+        raise RuntimeError("unreachable")
 
     def write(self, case: EvaluationCase, result: EvaluationResult) -> None:
         self._entries.append((case, result))
