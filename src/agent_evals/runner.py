@@ -23,6 +23,7 @@ from .loader import EvaluationCase, EvaluationSuite, SuiteOptions
 from .provisioning import AgentPool
 from .reporting.trace import build_trace_url
 from .results import EvaluationResult, Sink, StepResult, UsageMetrics
+from .schemas.message import Message, MessagePayload, Part
 from .schemas.response import Response
 from .tracing import fetch_trace
 
@@ -60,6 +61,7 @@ def run_suite(
         _preflight(suite.cases)
         pool = AgentPool()
         pool.provision(suite.cases, client)
+        _probe_agents(suite.cases, client, pool)
         if concurrency == 1 or len(suite.cases) == 1:
             for case in suite.cases:
                 _LOGGER.info("Running eval: %s", case.name)
@@ -121,6 +123,33 @@ def _preflight(cases: Sequence[EvaluationCase]) -> None:
                     problems.append(problem)
     if problems:
         raise RuntimeError("\n".join(problems))
+
+
+def _probe_agents(
+    cases: Sequence[EvaluationCase],
+    client: AgentClient,
+    pool: AgentPool,
+) -> None:
+    """Send a minimal probe to each unique agent; abort the sweep on rejection.
+
+    An agent that rejects the probe is likely out of credits or otherwise
+    unable to serve tasks.  Failing here — before any case runs — saves an
+    unattended sweep from running every case against a broken agent.
+    """
+    probed: set[str] = set()
+    for case in cases:
+        agent_id = pool.agent_id_for(case)
+        if agent_id in probed:
+            continue
+        probed.add(agent_id)
+        probe = MessagePayload(message=Message(parts=[Part(text="ping")])).prepare()
+        raw_response = client.send_message(agent_id, probe.to_dict())
+        response = Response.from_dict(raw_response)
+        if normalize_task_state(response.state) == "REJECTED":
+            text = extract_plain_text(raw_response) or response.state or "(no message)"
+            raise RuntimeError(
+                f"Agent rejected the preflight probe (likely out of credits): {text}"
+            )
 
 
 def run_suite_multiple(
@@ -364,16 +393,6 @@ def execute_case(
                 trace=trace_data,
                 trace_url=trace_url,
             )
-
-            normalized_state = normalize_task_state(response.state)
-            if normalized_state == "REJECTED":
-                response_text = extract_plain_text(raw_response)
-                _LOGGER.error(
-                    "AGENT REJECTED task in eval %s (step %s): %s",
-                    case.name,
-                    step.name or "(unnamed)",
-                    response_text or response.state or "(no message)",
-                )
 
             # Threading is polymorphic: a step carries its taskId forward iff one
             # of its expectations says so (only ``expected_state: input-required``

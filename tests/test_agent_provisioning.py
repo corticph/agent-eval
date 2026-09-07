@@ -165,7 +165,7 @@ def test_shared_spec_creates_one_agent_and_every_case_messages_it() -> None:
     results = run_suite(_suite(cases), client)
 
     assert client.create_count == 1
-    assert client.sent_to == ["agent-1"] * 4
+    assert client.sent_to == ["agent-1"] * 5
     assert all(r.agent_id == "agent-1" for r in results)
 
 
@@ -179,7 +179,7 @@ def test_two_distinct_specs_each_get_their_own_agent() -> None:
     run_suite(_suite(cases), client)
 
     assert client.create_count == 2
-    assert sorted(client.sent_to) == ["agent-1", "agent-2"]
+    assert sorted(client.sent_to) == ["agent-1", "agent-1", "agent-2", "agent-2"]
 
 
 def test_different_targeted_connectors_split_but_same_connector_collapses() -> None:
@@ -201,8 +201,8 @@ def test_different_targeted_connectors_split_but_same_connector_collapses() -> N
 
     # research (shared once) + writing = two agents, not three.
     assert client.create_count == 2
-    assert client.sent_to[0] == client.sent_to[1]  # both research cases
-    assert client.sent_to[2] != client.sent_to[0]  # writing is its own agent
+    assert client.sent_to[-3] == client.sent_to[-2]  # both research cases
+    assert client.sent_to[-1] != client.sent_to[-3]  # writing is its own agent
 
 
 def test_orchestrator_and_isolated_connector_from_one_spec_are_distinct() -> None:
@@ -216,7 +216,7 @@ def test_orchestrator_and_isolated_connector_from_one_spec_are_distinct() -> Non
     run_suite(_suite(cases), client)
 
     assert client.create_count == 2
-    assert client.sent_to[0] != client.sent_to[1]
+    assert client.sent_to[-2] != client.sent_to[-1]
 
 
 def test_inline_agent_connector_is_created_first_and_referenced_by_id() -> None:
@@ -252,7 +252,7 @@ def test_inline_agent_connector_is_created_first_and_referenced_by_id() -> None:
         {"type": "agent", "agentId": "agent-1"},
     ]
     assert results[0].agent_id == "agent-2"
-    assert client.sent_to == ["agent-2"]
+    assert client.sent_to == ["agent-2", "agent-2"]
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +270,7 @@ def test_override_cases_create_nothing_and_message_the_override_id() -> None:
     results = run_suite(_suite(cases), client)
 
     assert client.create_count == 0
-    assert client.sent_to == ["pinned-1", "pinned-2"]
+    assert client.sent_to == ["pinned-1", "pinned-2", "pinned-1", "pinned-2"]
     assert [r.agent_id for r in results] == ["pinned-1", "pinned-2"]
 
 
@@ -307,6 +307,42 @@ def test_provisioning_failure_aborts_the_run_before_any_message() -> None:
     assert client.sent_to == []
 
 
+def test_probe_rejection_aborts_the_run_before_any_case() -> None:
+    """An agent that rejects the preflight probe aborts the sweep — no case runs."""
+
+    class _RejectingClient:
+        def __init__(self) -> None:
+            self.send_count = 0
+
+        def create_agent(self, payload: dict[str, Any]) -> dict[str, Any]:
+            return {"id": "agent-1"}
+
+        def send_message(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+            self.send_count += 1
+            return {
+                "task": {
+                    "status": {
+                        "state": "rejected",
+                        "message": {"parts": [{"text": "insufficient credits"}]},
+                    }
+                }
+            }
+
+        def clone(self) -> "_RejectingClient":
+            return self
+
+        def close(self) -> None:
+            pass
+
+    client = _RejectingClient()
+    cases = [_case("a"), _case("b")]
+
+    with pytest.raises(RuntimeError, match="insufficient credits"):
+        run_suite(_suite(cases), client)
+
+    assert client.send_count == 1
+
+
 # ---------------------------------------------------------------------------
 # Concurrency
 # ---------------------------------------------------------------------------
@@ -319,7 +355,7 @@ def test_dedup_holds_under_concurrency() -> None:
     run_suite(_suite(cases, concurrency=4), client)
 
     assert client.create_count == 1
-    assert client.sent_to == ["agent-1"] * 8
+    assert client.sent_to == ["agent-1"] * 9
     assert client.all_creates_precede_all_sends
 
 
@@ -343,5 +379,5 @@ def test_sequential_case_reuses_one_agent_across_all_turns() -> None:
     results = run_suite(_suite([case]), client)
 
     assert client.create_count == 1
-    assert client.sent_to == ["agent-1", "agent-1", "agent-1"]
+    assert client.sent_to == ["agent-1", "agent-1", "agent-1", "agent-1"]
     assert results[0].agent_id == "agent-1"

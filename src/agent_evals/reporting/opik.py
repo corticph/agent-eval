@@ -22,14 +22,12 @@ from opik.evaluation.metrics import base_metric, score_result
 
 from ..environment import OPIK_URL_OVERRIDE_VAR, Environment
 from ..expectations import (
-    ExpectedState,
     Expectation,
     ExpectationResult,
     parse_expectations,
     registry,
 )
 from ..expectations.base import extract_plain_text
-from ..expectations.state import normalize_task_state
 from ..loader import EvaluationCase, EvaluationSuite, Step
 from ..results import EvaluationResult
 from ..schemas.agent import Agent
@@ -362,22 +360,11 @@ class ExpectationMetric(base_metric.BaseMetric):
 
         # A Harness Failure is the case-level ``error``, never a trail row, so a
         # trail entry only ever carries failed *checks* — the per-step reason is
-        # built from those alone.  A REJECTED state is surfaced explicitly so
-        # the agent's rejection message (e.g. "insufficient credits") is visible
-        # in the Opik experiment's score reasons.
+        # built from those alone.
         reasons: list[str] = []
         if error:
             reasons.append(_task_failed(error))
         for entry in step_results:
-            state = entry.get("response_state")
-            if normalize_task_state(state) == "REJECTED":
-                text = entry.get("response_text") or ""
-                step_name = entry.get("name") or _UNNAMED_STEP_KEY
-                reasons.append(
-                    f"{step_name}: AGENT REJECTED — {text}"
-                    if text
-                    else f"{step_name}: AGENT REJECTED"
-                )
             for result in entry.get("expectation_results") or []:
                 reasons.extend(
                     f"{entry.get('name') or _UNNAMED_STEP_KEY}: {check['detail']}"
@@ -536,53 +523,7 @@ class OpikSink:
         )
 
         if eval_result is not None:
-            self._log_rejection_feedback_scores(eval_result, by_name)
             self._log_usage_scores(eval_result)
-
-    def _log_rejection_feedback_scores(
-        self,
-        eval_result: Any,
-        by_name: dict[str, EvaluationResult],
-    ) -> None:
-        """Log a feedback score for every case the agent REJECTED.
-
-        The score is 1.0 when the eval expected the rejection (the step declared
-        ``expected_state: rejected`` and the check passed) and 0.0 when it was
-        unexpected.  The agent's rejection message (e.g. "insufficient credits")
-        rides in the score's ``reason`` field so it is visible in the Opik
-        experiment's feedback scores panel.
-        """
-        scores: list[dict[str, Any]] = []
-        for test_result in eval_result.test_results:
-            case_result = by_name.get(test_result.test_case.dataset_item_content.get("name"))
-            if case_result is None:
-                continue
-            for step in case_result.step_results:
-                if step.response is None:
-                    continue
-                if normalize_task_state(step.response.state) != "REJECTED":
-                    continue
-                text = extract_plain_text(step.response.to_dict()) or ""
-                expected_state_result = next(
-                    (r for r in step.results if r.key == ExpectedState.key),
-                    None,
-                )
-                rejected_was_expected = (
-                    expected_state_result is not None
-                    and expected_state_result.passed
-                )
-                scores.append(
-                    {
-                        "id": test_result.test_case.trace_id,
-                        "name": "agent_rejected",
-                        "value": 1.0 if rejected_was_expected else 0.0,
-                        "category_name": "REJECTED",
-                        "reason": text or step.response.state or "agent rejected task",
-                    }
-                )
-                break
-        if scores:
-            self._opik_client.log_traces_feedback_scores(scores=scores)
 
     def _log_usage_scores(self, eval_result: Any) -> None:
         """Log aggregate usage (credits, tokens) as experiment-level feedback scores.
