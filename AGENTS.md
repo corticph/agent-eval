@@ -54,8 +54,8 @@ Key flags:
 - `--tag`: tag all Opik experiments in the sweep (repeatable, forwarded to `--opik`)
 - `-j / --jobs`: max concurrent suites (default 3, use 1 for sequential)
 - `--retries`: retry failed suites N times (default 2; the kubectl tunnel drops connections under load but recovers fast)
-- `--resume`: re-run only suites that failed in the last sweep for this env; reads `runs/failed_<env>.txt` (written automatically after every sweep)
-- `--resume-file <path>`: resume from an explicit failed-suites file instead of the default
+- `--resume`: re-run only suites missing from Opik for the first `--tag` (queries Opik, compares against the full suite list, runs the ones without an experiment); requires `--tag`
+- `--resume-file <path>`: resume from an explicit failed-suites file instead of querying Opik
 - Extra args after the flags are forwarded to `agent-evals run` (e.g. `-v`, `--runs 3`)
 
 > **Parallel sweeps share the Opik tunnel.** The first sweep to finish will
@@ -67,25 +67,29 @@ runs include `--opik` so results land in Opik automatically.
 
 ### Resuming failed suites
 
-After every sweep, the script writes the list of failed suite paths to
-`runs/failed_<env>.txt` (gitignored). Use `--resume` to re-run only those
-suites on the next invocation — the file is updated with whatever still
-fails, so you can repeat until all pass.
+`--resume` uses Opik as the source of truth: it queries Opik for all
+experiments with the first `--tag`, compares their names against the full
+suite list, and re-runs only the suites that don't have an experiment yet
+(i.e. suites that failed before the experiment was created — tunnel drops,
+rate limiting, crashes).  Suites whose evals ran but failed still have an
+experiment in Opik, so they are **not** resumed (the eval failures are real,
+not infrastructure failures).
 
 ```bash
 # First sweep: some suites fail (rate-limiting, tunnel drops, etc.)
 bash run_all_evals.sh --env eu --tag "eu-$(date +%Y%m%d-%H%M%S)"
 
-# Resume only the failed suites (same env, same tag for Opik grouping)
+# Resume only the missing suites (same env + tag so Opik groups them together)
 bash run_all_evals.sh --env eu --tag "eu-20260907-120000" --resume
 
 # Repeat until "Nothing to resume"
 bash run_all_evals.sh --env eu --tag "eu-20260907-120000" --resume
 ```
 
-When all suites pass, the failed file is emptied and a subsequent `--resume`
-prints "Nothing to resume" and exits 0. Use `--resume-file <path>` to resume
-from an explicit file instead of the per-env default.
+When all suites have experiments in Opik, `--resume` prints "Nothing to
+resume" and exits 0.  Use `--resume-file <path>` to resume from an explicit
+file (one suite path per line, `#` comments supported) instead of querying
+Opik.
 
 ## 2. Comparing experiments
 
