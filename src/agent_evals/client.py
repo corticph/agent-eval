@@ -19,7 +19,7 @@ from .errors import (
 _LOGGER = logging.getLogger(__name__)
 
 # (connect timeout, read timeout) in seconds
-_DEFAULT_TIMEOUT: tuple[float, float] = (5, 120)
+_DEFAULT_TIMEOUT: tuple[float, float] = (5, 180)
 
 # Longest a single HTTP request may block with the default timeouts. Eval
 # wall-clock timeouts (``timeout_seconds``) must exceed this: the timeout
