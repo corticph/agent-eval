@@ -254,6 +254,30 @@ diff trace1.txt trace2.txt
 4. Fetch the trace to understand the agent's reasoning: `uv run python -m agent_evals.scripts.fetch_traces --exp <id> --case <case-name>`
 5. (Optional) Generate an HTML report following [`eval-report-style.md`](eval-report-style.md).
 
+### Deep-dive on regressions
+
+After comparing, don't just report the deltas — **do root-cause dives** on the
+worst regressions. For each case with a significant score drop:
+
+1. Fetch the trace from both environments (see [Fetching OpenInference
+   traces](#4-fetching-openinference-traces)).
+2. Compare the traces side-by-side (`diff trace1.txt trace2.txt`) to find
+   where the agent's behaviour diverged.
+3. Check whether the failure is an infrastructure issue (tunnel drops,
+   rate limiting) or a real regression (wrong tool call, hallucinated
+   arguments, context window hit).
+
+**Use sub-agents in parallel.** When several cases regress, dispatch one
+sub-agent per case to fetch traces, inspect evals, and summarise the root
+cause independently. This is much faster than serial investigation and
+each sub-agent's context stays focused on a single failure.
+
+```bash
+# Example: parallel root-cause dives on top regressions
+# Each sub-agent gets one case and does: fetch traces (both envs), diff,
+# inspect_eval, and report back with a short root-cause summary.
+```
+
 ## 4. Generating eval reports
 
 When the user asks for a report of eval results, follow the style guide in
