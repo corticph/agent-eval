@@ -261,3 +261,86 @@ def test_empty_reference_auto_passes_without_calling_the_judge(
 
     assert result.passed
     assert fake.client_kwargs is None
+
+
+def test_empty_content_retries_then_fails_with_prompt_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty model responses are retried; if all retries fail, the error
+    message includes the prompt length and model name for diagnosis."""
+    call_count = {"n": 0}
+
+    class _EmptyThenFail:
+        OpenAIError = type("OpenAIError", (Exception,), {})
+        APIConnectionError = type("APIConnectionError", (Exception,), {})
+
+        class OpenAI:
+            def __init__(self, **kwargs):
+                self.chat = types.SimpleNamespace(
+                    completions=types.SimpleNamespace(create=self._create)
+                )
+
+            def _create(self, **kwargs):
+                call_count["n"] += 1
+                message = types.SimpleNamespace(content="")
+                choice = types.SimpleNamespace(message=message)
+                return types.SimpleNamespace(choices=[choice])
+
+    monkeypatch.setattr(judge_module, "openai", _EmptyThenFail())
+    monkeypatch.setenv("JUDGE_API_KEY", "ck-test")
+    monkeypatch.setattr(judge_module.time, "sleep", lambda s: None)
+
+    passed, explanation = Judge._judge("x" * 50000)
+
+    assert passed is False
+    assert "empty content" in explanation
+    assert "50000 chars" in explanation
+    assert judge_module._JUDGE_RETRIES + 1 == call_count["n"]
+
+
+def test_empty_content_then_success_passes(monkeypatch: pytest.MonkeyPatch):
+    """If the model returns empty on the first attempt but succeeds on retry,
+    the verdict is used."""
+    call_count = {"n": 0}
+    verdict = _verdict("PASS", "ok")
+
+    class _EmptyFirst:
+        OpenAIError = type("OpenAIError", (Exception,), {})
+        APIConnectionError = type("APIConnectionError", (Exception,), {})
+
+        class OpenAI:
+            def __init__(self, **kwargs):
+                self.chat = types.SimpleNamespace(
+                    completions=types.SimpleNamespace(create=self._create)
+                )
+
+            def _create(self, **kwargs):
+                call_count["n"] += 1
+                content = "" if call_count["n"] == 1 else verdict
+                message = types.SimpleNamespace(content=content)
+                choice = types.SimpleNamespace(message=message)
+                return types.SimpleNamespace(choices=[choice])
+
+    monkeypatch.setattr(judge_module, "openai", _EmptyFirst())
+    monkeypatch.setenv("JUDGE_API_KEY", "ck-test")
+    monkeypatch.setattr(judge_module.time, "sleep", lambda s: None)
+
+    passed, explanation = Judge._judge("test prompt")
+
+    assert passed is True
+    assert explanation == "ok"
+    assert call_count["n"] == 2
+
+
+def test_oversized_prompt_is_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prompts exceeding _MAX_PROMPT_CHARS are truncated before sending."""
+    fake = _FakeOpenAI(_verdict("PASS", "ok"))
+    _install(monkeypatch, fake)
+
+    oversized = "x" * (judge_module._MAX_PROMPT_CHARS + 5000)
+    Judge._judge(oversized)
+
+    assert fake.create_kwargs is not None
+    sent = fake.create_kwargs["messages"][0]["content"]
+    assert len(sent) <= judge_module._MAX_PROMPT_CHARS + 20  # +truncation marker
+    assert sent.endswith("[truncated]")
