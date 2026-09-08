@@ -4,6 +4,19 @@ This repo (`agent-eval`) is an evaluation harness for AI agent workflows. Evals
 run against named environments (local, staging-eu, eu, us, etc.), record results
 to Opik, and can be compared across runs to find regressions.
 
+### Environment ordering
+
+Environments progress from newest to oldest, newest on the left:
+
+1. **local** — developer's machine; bleeding edge
+2. **dev** (dev-weu) — shared dev cluster; next-to-merge changes
+3. **staging** (staging-eu) — pre-prod; stable, close to production
+4. **prod** (eu, us) — production
+
+When comparing two environments, the **newer** environment (left) is the one
+under test; the **older** environment (right) is the baseline. Regressions
+are score drops from newer vs older; improvements are score gains.
+
 ## 1. Running eval sweeps
 
 Use `run_all_evals.sh` to run every suite against an environment. Each suite
@@ -42,8 +55,8 @@ bash run_all_evals.sh --env local --tag "local-$(date +%Y%m%d-%H%M%S)" --jobs 1
 bash run_all_evals.sh --env staging-eu --tag "staging-eu-$(date +%Y%m%d-%H%M%S)"
 
 # Run two environments in parallel with unique tags
-bash run_all_evals.sh --env staging-eu --tag "staging-eu-$(date +%Y%m%d-%H%M%S)" -j 3 &
-bash run_all_evals.sh --env dev-weu  --tag "dev-weu-$(date +%Y%m%d-%H%M%S)"  -j 3 &
+bash run_all_evals.sh --env staging-eu --tag "staging-eu-$(date +%Y%m%d-%H%M%S)" &
+bash run_all_evals.sh --env dev-weu  --tag "dev-weu-$(date +%Y%m%d-%H%M%S)"  &
 wait
 ```
 
@@ -52,7 +65,7 @@ Key flags:
 - `--evals-dir`: directory containing suite YAML files (default: `./evals`, then `../agent-eval-cases/evals`)
 - `--suite`: substring filter for suite paths (repeatable)
 - `--tag`: tag all Opik experiments in the sweep (repeatable, forwarded to `--opik`)
-- `-j / --jobs`: max concurrent suites (default 3, use 1 for sequential)
+- `-j / --jobs`: max concurrent suites (default 10, use 1 for sequential; failed suites can be resumed with `--resume`)
 - `--retries`: retry failed suites N times (default 2; the kubectl tunnel drops connections under load but recovers fast)
 - `--resume`: re-run only suites missing from Opik for the first `--tag` (queries Opik, compares against the full suite list, runs the ones without an experiment); requires `--tag`
 - `--resume-file <path>`: resume from an explicit failed-suites file instead of querying Opik

@@ -19,7 +19,7 @@ usage() {
   echo "  --tag        Tag for all Opik experiments in this sweep (repeatable)."
   echo "               Useful for grouping runs in compare_experiments."
   echo "               Forwarded to agent-evals as --tag."
-  echo "  -j, --jobs   Max concurrent suites (default: 4). Use 1 for sequential."
+  echo "  -j, --jobs   Max concurrent suites (default: 10). Use 1 for sequential."
   echo "  --retries    Retry failed suites N times (default: 2). The kubectl"
   echo "               tunnel drops connections under load but recovers fast."
   echo "               Set to 0 to disable retries."
@@ -46,7 +46,7 @@ ENVIRONMENT=""
 EVALS_DIR_ARG=""
 SUITE_FILTERS=()
 TAGS=()
-JOBS=3
+JOBS=10
 RETRIES=2
 RESUME=false
 RESUME_FILE=""
