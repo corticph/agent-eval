@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+import requests as _requests
 import yaml
 
 from .client import MAX_HTTP_TIMEOUT_SECONDS
@@ -316,7 +317,56 @@ def _resolve_variable_spec(spec: dict[str, Any]) -> str:
                 f"random_int min ({min_value}) cannot exceed max ({max_value})"
             )
         return str(random.randint(min_value, max_value))
+    if spec_type == "oauth":
+        return _resolve_oauth_token(spec)
     raise TypeError(f"Unsupported variable spec type {spec_type!r}")
+
+
+def _resolve_oauth_token(spec: dict[str, Any]) -> str:
+    """Exchange client credentials for an access token via OAuth 2.0.
+
+    Supports the ``env:VAR`` prefix on string fields (``client_id``,
+    ``client_secret``) so secrets stay out of the YAML.
+    """
+    token_url = spec.get("token_url")
+    if not token_url:
+        raise ValueError("oauth spec requires 'token_url'")
+    client_id = _resolve_spec_field(spec, "client_id")
+    client_secret = _resolve_spec_field(spec, "client_secret")
+    grant_type = spec.get("grant_type", "client_credentials")
+    scope = spec.get("scope", "")
+    data = {"grant_type": grant_type}
+    if scope:
+        data["scope"] = scope
+    try:
+        response = _requests.post(
+            token_url,
+            data=data,
+            auth=(client_id, client_secret),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
+        response.raise_for_status()
+    except _requests.RequestException as exc:
+        raise RuntimeError(
+            f"OAuth token request to {token_url} failed: {exc}"
+        ) from exc
+    token = response.json().get("access_token")
+    if not token:
+        raise ValueError(
+            f"OAuth token response from {token_url} did not include 'access_token'"
+        )
+    return token
+
+
+def _resolve_spec_field(spec: dict[str, Any], key: str) -> str:
+    """Resolve a string field from a variable spec, honouring the ``env:`` prefix."""
+    value = spec.get(key)
+    if not value:
+        raise ValueError(f"oauth spec requires '{key}'")
+    if isinstance(value, str) and value.startswith("env:"):
+        return load_variable_value(value)
+    return value
 
 
 def _extract_agent_id_override(
