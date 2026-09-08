@@ -18,7 +18,14 @@ from typing import Any
 
 from ..base import EvaluationContext
 from ..shared.utils import extract_source_at
-from .base import Judge
+from .base import Judge, _MAX_PROMPT_CHARS
+
+# Reserve room for the prompt template text, instructions, and the summary.
+# The summary is the thing being evaluated — it must always be present in full.
+# Sources are truncated to fit the remaining budget so the judge always sees
+# the complete summary (truncation in ``Judge._judge`` cuts from the end, which
+# would silently drop the summary when sources are large).
+_SOURCE_BUDGET = _MAX_PROMPT_CHARS - 8000
 
 _FAITHFULNESS_PROMPT = """\
 You are an impartial evaluator checking whether an AI agent's summary is \
@@ -94,9 +101,13 @@ class FaithfulToSource(Judge):
     def _build_prompt(self, ctx: EvaluationContext) -> str:
         source_path = self.config.get("source_path", "$.response")
         sources = extract_source_at(ctx.response, source_path)
+        if sources and sources.strip():
+            sources = sources.strip()
+            if len(sources) > _SOURCE_BUDGET:
+                sources = sources[:_SOURCE_BUDGET] + "\n...[sources truncated]"
+        else:
+            sources = "(no sources were retrieved)"
         return _FAITHFULNESS_PROMPT.format(
-            sources=sources.strip()
-            if sources and sources.strip()
-            else "(no sources were retrieved)",
+            sources=sources,
             summary=ctx.plain_text,
         )
