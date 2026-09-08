@@ -56,6 +56,9 @@ Preferences learned for generating self-contained HTML eval reports.
     checking for the wrong things.
   - Opik trace link (clickable).
   - `inspect_eval` command (copy-pasteable).
+  - `fetch_traces` command (copy-pasteable) so the reader can pull the
+    full OpenInference trace — the reasoning chain, tool calls, and token
+    counts — for deeper root-cause analysis.
 
 ## Root cause analysis
 
@@ -64,6 +67,11 @@ Preferences learned for generating self-contained HTML eval reports.
 - Label each as **Agent bug** (red), **Mixed** (amber), or **Improved** (green).
 - For each pattern, state the root cause explicitly in a callout box.
 - **Always inspect both sides** (local + staging) to understand what changed.
+- **Fetch traces for both sides** when the root cause isn't obvious from the
+  response text alone — the trace shows which tools were called, what
+  arguments were used, and whether the tool list or token counts changed
+  between environments. See [Fetching OpenInference
+  traces](#fetching-openinference-traces) in `AGENTS.md` for commands.
 - Flag when an eval is **too demanding** or **too brittle** — the user wants to
   know if the eval itself needs fixing, not just the agent.
 
@@ -75,6 +83,23 @@ Preferences learned for generating self-contained HTML eval reports.
 - Improvements, not just regressions — the user wants the full picture.
 - A recommendations section at the end: what to fix in the agent, what to fix
   in the evals.
+
+## Trace output (fetch_traces --html)
+
+When embedding or linking trace output in a report, the `fetch_traces --html`
+mode follows the same progressive-disclosure rules:
+
+- Each span (`[LLM]`, `[TOOL]`, `[CHAIN]`) is a `<details>` collapsible,
+  starting collapsed.
+- Within an `[LLM]` span, messages, tool definitions, and the response are
+  nested `<details>` sections.
+- Messages are deduplicated across LLM calls — repeated context doesn't
+  appear. When the tool set hasn't changed, show `(same as above)` instead
+  of repeating definitions.
+- Default view shows only tool names (not full descriptions); full
+  descriptions appear inside the expanded `tools` `<details>`.
+- Tool calls and results are truncated to 500 characters in the summary
+  view; the full data is available in `--json` mode.
 
 ## Footer
 

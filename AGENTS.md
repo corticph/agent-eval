@@ -164,11 +164,82 @@ The output is structured as:
 
 The `--exp` ID comes from the Opik UI or the `--list` output of `compare_experiments`.
 
+## 4. Fetching OpenInference traces
+
+`inspect_eval` shows what went in and what came out; to understand *why* the
+agent behaved the way it did — which tools it called, how many tokens each
+LLM call consumed, what the reasoning chain looked like — fetch the
+OpenInference trace from the agent API's trace endpoint.
+
+```bash
+# List cases and their context IDs (no trace fetch):
+uv run python -m agent_evals.scripts.fetch_traces --exp <experiment-id> --list
+
+# Fetch a single case's trace as compact text (default):
+uv run python -m agent_evals.scripts.fetch_traces --exp <experiment-id> --case my_case
+
+# Fetch all cases' traces:
+uv run python -m agent_evals.scripts.fetch_traces --exp <experiment-id>
+
+# Write foldable HTML (collapsible span tree) to a file:
+uv run python -m agent_evals.scripts.fetch_traces --exp <experiment-id> --html -o traces.html
+
+# Raw JSON for programmatic access:
+uv run python -m agent_evals.scripts.fetch_traces --exp <experiment-id> --json -o traces.json
+
+# Verbose text (timestamps, full tool def descriptions):
+uv run python -m agent_evals.scripts.fetch_traces --exp <experiment-id> --case my_case --verbose
+
+# Override the agent API environment (defaults to experiment metadata):
+uv run python -m agent_evals.scripts.fetch_traces --exp <experiment-id> --env eu
+```
+
+The default compact-text output shows only the conversation messages
+(user/assistant/tool), tool definitions (names only), tool calls with
+arguments, and tool results — deduplicated across LLM calls so repeated
+context doesn't fill the output. Use `--verbose` for timestamps and full
+tool descriptions, `--html` for a foldable report, or `--json` for the raw
+OpenInference span data.
+
+Each trace contains spans in a tree: root `CHAIN` spans wrap `LLM` calls
+and `TOOL` invocations. The compact output walks this tree, showing:
+- **[LLM]**: model name, token count, new messages since last call, tool
+  list, and the assistant's response (tool calls or text).
+- **[TOOL]**: tool name, arguments, and result.
+- **[CHAIN]**: orchestration spans (MCP registration, tool listing, etc.).
+
+### Using traces for root-cause analysis
+
+When a case fails or regresses, fetch the trace to understand the agent's
+reasoning chain:
+
+1. **Did the agent call the right tools?** Check `[TOOL]` spans — were the
+   expected connectors invoked? Were arguments correct?
+2. **Did the LLM choose the right tool?** Look at the `[LLM]` response — did
+   it pick the right tool call, or hallucinate arguments?
+3. **Was the context too large?** Check token counts in `[LLM]` headers — a
+   case that regressed may have hit a context window limit.
+4. **Did a tool return unexpected data?** Compare `[TOOL]` results between
+   the two environments' traces for the same case.
+5. **Did the tool list change?** The `tools:` line shows what tools the LLM
+   was offered — a missing or renamed tool could explain a regression.
+
+Compare traces across environments by fetching the same case from two
+experiments:
+
+```bash
+uv run python -m agent_evals.scripts.fetch_traces --exp <exp1> --case my_case -o trace1.txt
+uv run python -m agent_evals.scripts.fetch_traces --exp <exp2> --case my_case -o trace2.txt
+diff trace1.txt trace2.txt
+```
+
 ## Typical workflow
 
 1. Tag and run a sweep: `bash run_all_evals.sh --env local --tag "local-$(date +%Y%m%d-%H%M%S)"`
 2. Compare against a baseline: `uv run python -m agent_evals.scripts.compare_experiments --name <suite-prefix> --tag1 local-20260904-120000 --tag2 local-20260904-140612 --show-reason --sort regression`
 3. Inspect failures: `uv run python -m agent_evals.scripts.inspect_eval --exp <id> --case <case-name>`
+4. Fetch the trace to understand the agent's reasoning: `uv run python -m agent_evals.scripts.fetch_traces --exp <id> --case <case-name>`
+5. (Optional) Generate an HTML report following [`eval-report-style.md`](eval-report-style.md).
 
 ## 4. Generating eval reports
 
