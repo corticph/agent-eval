@@ -168,6 +168,15 @@ uv run python -m agent_evals.scripts.compare_experiments \
 Use `--results-dir <path>` to point the local cache at a non-default
 location (e.g. `../agent-eval-cases/results`).
 
+When comparing by tag, you can omit `--name` to match all suites (tag-only
+mode).  If one side's results are on disk and the other's aren't, the
+comparison automatically uses local JSON for one side and the Opik API for
+the other — no extra flags needed.
+
+> **Note:** the default discovery limit is 500 experiments.  If your Opik
+> project has more, pass `--limit 5000` so the Opik fallback can find older
+> tagged experiments.
+
 ### Resuming failed suites
 
 `--resume` uses Opik as the source of truth: it queries Opik for all
