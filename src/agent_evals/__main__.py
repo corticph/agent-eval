@@ -11,7 +11,8 @@ from typing import Callable, Sequence
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(_REPO_ROOT / ".env", override=True)
 
 from .client import AgentClient
 from .environment import (
@@ -185,12 +186,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def _auto_output_path(suite_path: Path, environment: str | None = None) -> Path:
     """Generate a timestamped output path mirroring the suite's folder structure.
 
-    For example ``evals/interviewing/single.yaml`` with env ``eu`` produces
-    ``results/interviewing/single_20260414_120000_eu.json``.
-
-    Uses ``absolute()`` (not ``resolve()``) so that a symlinked ``evals/``
-    directory keeps results in the repo root, not in the symlink target's
-    parent.
+    Results always go to ``<repo>/results/``, regardless of where the evals
+    directory lives (symlink, sibling checkout, or explicit ``--evals-dir``).
+    The relative path under the evals directory is mirrored so results stay
+    organized by topic (e.g. ``results/medical-calculator/manual_*.json``).
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     env_suffix = f"_{environment}" if environment else ""
@@ -200,11 +199,11 @@ def _auto_output_path(suite_path: Path, environment: str | None = None) -> Path:
     for parent in abs_path.parents:
         if parent.name == "evals":
             rel = abs_path.relative_to(parent)
-            results_dir = parent.parent / "results"
+            results_dir = _REPO_ROOT / "results"
             return results_dir / rel.parent / f"{rel.stem}_{timestamp}{env_suffix}.json"
 
-    # Fallback: put results next to the suite file.
-    return abs_path.parent / "results" / f"{abs_path.stem}_{timestamp}{env_suffix}.json"
+    # Fallback: put results in the repo's results dir with the suite's stem.
+    return _REPO_ROOT / "results" / f"{abs_path.stem}_{timestamp}{env_suffix}.json"
 
 
 def _resolve_suite_paths(suite_arg: str) -> list[Path]:

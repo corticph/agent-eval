@@ -297,6 +297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--resume-file", default=None, help="Resume from an explicit file (one suite path per line).")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity.")
     parser.add_argument("--no-opik", action="store_true", help="Skip Opik recording and tunnel (write local JSON only).")
+    parser.add_argument("--model", type=str, default=None, help="Override the LLM model for all agents in the sweep.")
     parser.add_argument("extra", nargs=argparse.REMAINDER, help="Extra args forwarded to agent-evals run (e.g. -v, --runs 3).")
     args = parser.parse_args(argv)
 
@@ -309,6 +310,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         retries=args.retries,
         resume=args.resume,
         resume_file=args.resume_file,
+        model=args.model,
         extra_args=list(args.extra) if args.extra else None,
         verbose=args.verbose,
         use_opik=not args.no_opik,

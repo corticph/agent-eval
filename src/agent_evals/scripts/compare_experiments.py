@@ -386,8 +386,8 @@ def main() -> None:
     if not args.name and args.tag1 and args.tag2:
         if args.exp1 or args.exp2:
             raise SystemExit("Cannot use --exp1/--exp2 with --tag1/--tag2.")
-        label1 = " ".join(args.tag1) if isinstance(args.tag1, list) else args.tag1
-        label2 = " ".join(args.tag2) if isinstance(args.tag2, list) else args.tag2
+        label1 = " ".join(args.tag1)
+        label2 = " ".join(args.tag2)
         exps1 = _find_by_tags(source, args.tag1, name=None, env=args.env1, label="side1", limit=args.limit)
         exps2 = _find_by_tags(source, args.tag2, name=None, env=args.env2, label="side2", limit=args.limit)
         matched = sorted(set(exps1) & set(exps2))
@@ -413,15 +413,15 @@ def main() -> None:
         if args.env1:
             sel1_parts.append(f"env={args.env1!r}")
         if args.tag1:
-            sel1_parts.append(f"tag={' '.join(args.tag1)!r}" if isinstance(args.tag1, list) else f"tag={args.tag1!r}")
+            sel1_parts.append(f"tag={' '.join(args.tag1)!r}")
         if args.env2:
             sel2_parts.append(f"env={args.env2!r}")
         if args.tag2:
-            sel2_parts.append(f"tag={' '.join(args.tag2)!r}" if isinstance(args.tag2, list) else f"tag={args.tag2!r}")
+            sel2_parts.append(f"tag={' '.join(args.tag2)!r}")
         label1 = f"{args.name!r} / {' '.join(sel1_parts)}"
         label2 = f"{args.name!r} / {' '.join(sel2_parts)}"
-        tags1 = args.tag1 if isinstance(args.tag1, list) else [args.tag1] if args.tag1 else None
-        tags2 = args.tag2 if isinstance(args.tag2, list) else [args.tag2] if args.tag2 else None
+        tags1 = args.tag1 or None
+        tags2 = args.tag2 or None
         if tags1 and len(tags1) > 1:
             exps1 = _find_by_tags(source, tags1, args.name, env=args.env1, label="side1", limit=args.limit)
         else:
@@ -444,44 +444,6 @@ def main() -> None:
         if not rows:
             # Grab a sample item from the first matched experiment to show
             # available scores
-            if matched:
-                sample = source.get_items(exps1[matched[0]])
-                if sample:
-                    print(
-                        f"No items with score {args.score!r}; available scores: "
-                        f"{source.available_scores(sample[0])}"
-                    )
-        return
-
-    # Tag-only mode: --tag1/--tag2 without --name (matches all experiments)
-    if (args.tag1 or args.tag2) and args.name is None:
-        if not (args.tag1) or not (args.tag2):
-            raise SystemExit(
-                "Tag-only mode requires both --tag1 and --tag2 "
-                "(or use --name for discovery mode, or --exp1/--exp2 for direct mode)."
-            )
-        exps1 = _find_by_selector(
-            source, name=None, tag=args.tag1,
-            label="side1", limit=args.limit,
-        )
-        exps2 = _find_by_selector(
-            source, name=None, tag=args.tag2,
-            label="side2", limit=args.limit,
-        )
-        matched = sorted(set(exps1) & set(exps2))
-        label1 = f"tag={args.tag1!r}"
-        label2 = f"tag={args.tag2!r}"
-        print(
-            f"\nside1 = {label1}  ({len(exps1)} experiments)"
-            f"    side2 = {label2}  ({len(exps2)} experiments)"
-            f"    matched: {len(matched)}"
-        )
-        rows, only1, only2 = _build_rows(source, exps1, exps2, args.score)
-        _sort_rows(rows, args.sort)
-        _print_summary(rows, args.score, args.sort, only1, only2, label1, label2)
-        _print_detail(rows, args.n, args.show_reason, args.show_trace)
-
-        if not rows:
             if matched:
                 sample = source.get_items(exps1[matched[0]])
                 if sample:

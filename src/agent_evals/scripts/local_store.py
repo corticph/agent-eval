@@ -127,9 +127,9 @@ def _read_metadata(path: Path) -> dict[str, Any]:
     """Read the _metadata entry from a results JSON file (if present)."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if data and isinstance(data[0], dict) and data[0].get("_metadata"):
+        if isinstance(data, list) and data and isinstance(data[0], dict) and data[0].get("_metadata"):
             return data[0]
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, TypeError):
         pass
     return {}
 
@@ -217,9 +217,14 @@ def has_tag(exp: SimpleNamespace, tag: str) -> bool:
     """Check if a local experiment matches a tag.
 
     Tags are read from the ``_metadata`` entry in the results JSON.  Falls
-    back to substring match on the file path for files written before
-    metadata support was added.
+    back to substring match on the file path **only** for files without
+    metadata (written before metadata support was added).
     """
     if tag in (exp.tags or []):
         return True
-    return tag in exp.id or tag in exp.name
+    # Only fall back to substring match for files without metadata —
+    # otherwise "smoke" matches the directory name, "eu" matches the
+    # env suffix, etc.
+    if not exp.tags and not (exp.metadata or {}).get("_metadata"):
+        return tag in exp.id
+    return False

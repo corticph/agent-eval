@@ -8,6 +8,7 @@ work with either source via ``--source opik`` (default) or ``--source local``.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,8 +21,10 @@ from . import local_store
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 dotenv.load_dotenv(_REPO_ROOT / ".env")
 
-_MAX_RETRIES = 1
+_MAX_RETRIES = 3
 _RETRY_BACKOFF = 2.0
+
+_DEFAULT_RESULTS_DIR = _REPO_ROOT / "results"
 
 
 def _make_opik_client():
@@ -100,7 +103,7 @@ def _opik_get_items(client, experiment_id):
         )
         dataset_id = getattr(exp_data, "dataset_id", None)
         if not dataset_id:
-            print(f"Warning: experiment {experiment_id[:8]} has no dataset_id", file=__import__('sys').stderr)
+            print(f"Warning: experiment {experiment_id[:8]} has no dataset_id", file=sys.stderr)
             return []
         return _retry(
             lambda: rest_operations.find_experiment_items_for_dataset(
@@ -113,7 +116,7 @@ def _opik_get_items(client, experiment_id):
             what=f"get items {experiment_id[:8]}",
         )
     except Exception as exc:
-        print(f"Warning: could not fetch items for experiment {experiment_id[:8]}: {exc}", file=__import__('sys').stderr)
+        print(f"Warning: could not fetch items for experiment {experiment_id[:8]}: {exc}", file=sys.stderr)
         return []
 
 
@@ -167,7 +170,7 @@ class OpikSource(DataSource):
     def __init__(self, results_dir: Path | list[Path] | None = None) -> None:
         self._client = None
         if results_dir is None:
-            results_dir = [Path("results")]
+            results_dir = [_DEFAULT_RESULTS_DIR]
         elif isinstance(results_dir, (list, tuple)):
             results_dir = [Path(d) for d in results_dir]
         else:
@@ -254,21 +257,26 @@ class LocalSource(DataSource):
         return local_store.has_tag(exp, tag)
 
 
+def _resolve_results_dirs(results_dir: str | list[str] | None) -> list[Path]:
+    """Normalise results_dir to a list of Paths, defaulting to the repo root."""
+    if isinstance(results_dir, list):
+        return [Path(d) for d in results_dir]
+    if results_dir:
+        return [Path(results_dir)]
+    return [_DEFAULT_RESULTS_DIR]
+
+
 def make_source(source: str = "opik", *, results_dir: str | list[str] | None = None) -> DataSource:
     """Create a data source by name.
 
     ``opik`` (default) connects to Opik but checks local results first when
     a ``results_dir`` is available (local-cache-first).  ``local`` reads
-    exclusively from ``results_dir`` (default: ``results/``).  ``results_dir``
-    may be a single path or a list of paths to scan multiple directories.
+    exclusively from ``results_dir`` (default: ``<repo>/results/``).
+    ``results_dir`` may be a single path or a list of paths to scan multiple
+    directories.
     """
+    dirs = _resolve_results_dirs(results_dir)
     if source == "local":
-        if isinstance(results_dir, list):
-            dirs = [Path(d) for d in results_dir]
-        elif results_dir:
-            dirs = [Path(results_dir)]
-        else:
-            dirs = [Path("results")]
         found = [d for d in dirs if d.is_dir()]
         if not found:
             dir_list = ", ".join(str(d) for d in dirs)
@@ -279,11 +287,4 @@ def make_source(source: str = "opik", *, results_dir: str | list[str] | None = N
         return LocalSource(found)
     # Opik with local-cache-first: pass results_dir so OpikSource can check
     # local JSON files before hitting the API.
-    if results_dir:
-        if isinstance(results_dir, list):
-            dirs = [Path(d) for d in results_dir]
-        else:
-            dirs = [Path(results_dir)]
-    else:
-        dirs = [Path("results")]
     return OpikSource(dirs)
