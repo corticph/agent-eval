@@ -20,8 +20,8 @@ are score drops from newer vs older; improvements are score gains.
 ## 1. Running eval sweeps
 
 Use `agent-evals sweep` to run every suite against an environment. Each suite
-becomes a separate Opik experiment. Tag sweeps to group them for comparison
-later.
+becomes a separate experiment (Opik and/or local JSON). Tag sweeps to group
+them for comparison later.
 
 The eval case definitions live in a separate cases repo. By default the
 scripts look for a local `evals/` directory first, then fall back to
@@ -77,11 +77,12 @@ Key flags:
 - `--env` (required): environment to run against (local, staging-eu, eu, us, dev-weu)
 - `--evals-dir`: directory containing suite YAML files (default: `./evals`, then `../agent-eval-cases/evals`)
 - `--suite`: substring filter for suite paths (repeatable)
-- `--tag`: tag experiments in the sweep (repeatable, stored in Opik tags or local JSON metadata)
+- `--tag`: tag experiments in the sweep (repeatable, stored in Opik tags and/or local JSON metadata)
+- `--model`: override the LLM model for all agents in the sweep (forwarded to each `run` subprocess)
 - `-j / --jobs`: max concurrent suites (default 10, use 1 for sequential; failed suites can be resumed with `--resume`)
 - `--retries`: retry failed suites N times (default 2; the kubectl tunnel drops connections under load but recovers fast)
 - `--no-opik`: skip Opik recording and tunnel (write local JSON only; tags are still stored in JSON metadata)
-- `--resume`: re-run only suites missing from Opik for the first `--tag` (queries Opik, compares against the full suite list, runs the ones without an experiment); requires `--tag`
+- `--resume`: re-run only suites missing from the first `--tag` (checks local results first, then Opik); requires `--tag`
 - `--resume-file <path>`: resume from an explicit failed-suites file instead of querying Opik
 - Extra args after the flags are forwarded to `agent-evals run` (e.g. `-v`, `--runs 3`)
 
@@ -89,8 +90,9 @@ Key flags:
 > leave the tunnel running if other sweep processes are still active, so
 > the second sweep's Opik uploads are not interrupted.
 
-The command pre-warms the kubectl tunnel to Opik before launching suites. All
-runs include `--opik` so results land in Opik automatically.
+The command pre-warms the kubectl tunnel to Opik before launching suites
+(unless `--no-opik` is passed). Without `--no-opik`, all runs include `--opik`
+so results land in Opik automatically.
 
 > **Thin shell wrappers** `run_all_evals.sh` and `run_eval.sh` are kept as
 > one-line wrappers for muscle memory — they just forward to `agent-evals
@@ -102,10 +104,11 @@ Add `--no-opik` to any sweep to skip Opik recording and write results to
 `results/*.json` only. Tags are persisted in the JSON metadata, so you can
 compare local runs the same way you compare Opik runs.
 
-**Results directory**: results are written alongside the evals directory
-(e.g. `--evals-dir ../agent-eval-cases/evals` writes to
-`../agent-eval-cases/results/`).  When comparing local results, pass
-`--results-dir` to point the local source at the right location.
+**Results directory**: results are always written to `<repo>/results/`,
+regardless of where the evals directory lives (symlink, sibling checkout, or
+`--evals-dir`).  The local cache reads from this location by default — no
+`--results-dir` needed for the common case.  Use `--results-dir` to scan
+additional or legacy directories.
 
 ```bash
 # Run sweep locally with a tag
@@ -179,12 +182,12 @@ the other — no extra flags needed.
 
 ### Resuming failed suites
 
-`--resume` uses Opik as the source of truth: it queries Opik for all
+`--resume` checks local results first, then falls back to Opik: it queries for all
 experiments with the first `--tag`, compares their names against the full
 suite list, and re-runs only the suites that don't have an experiment yet
 (i.e. suites that failed before the experiment was created — tunnel drops,
 rate limiting, crashes).  Suites whose evals ran but failed still have an
-experiment in Opik, so they are **not** resumed (the eval failures are real,
+experiment, so they are **not** resumed (the eval failures are real,
 not infrastructure failures).
 
 ```bash
@@ -198,7 +201,7 @@ uv run agent-evals sweep --env eu --tag "eu-20260907-120000" --resume
 uv run agent-evals sweep --env eu --tag "eu-20260907-120000" --resume
 ```
 
-When all suites have experiments in Opik, `--resume` prints "Nothing to
+When all suites have experiments, `--resume` prints "Nothing to
 resume" and exits 0.  Use `--resume-file <path>` to resume from an explicit
 file (one suite path per line, `#` comments supported) instead of querying
 Opik.
@@ -277,7 +280,7 @@ uv run python -m agent_evals.scripts.compare_experiments --list --name <suite-pr
 
 Key flags:
 - `--name`: experiment name substring (omit to match all suites in tag-only mode)
-- `--tag1 / --tag2`: filter each side by tag
+- `--tag1 / --tag2`: filter each side by tag (accepts multiple values — newest per suite wins)
 - `--env1 / --env2`: filter each side by environment (from experiment metadata)
 - `--exp1 / --exp2`: direct experiment IDs (bypasses discovery)
 - `--source`: `opik` (default) or `local` (uses `results/*.json`)
@@ -442,7 +445,7 @@ script** — adapt the categorization, styling, and layout to your own workflow.
 It produces the report in two steps:
 
 ```bash
-# 1. Generate the report from Opik data (supports multiple tags per side,
+# 1. Generate the report from Opik or local data (supports multiple tags per side,
 #    newest experiment per suite name wins):
 uv run python -m agent_evals.scripts.generate_report generate \
     --tag1 <baseline-tag> --tag2 <beta-tag> \
@@ -478,25 +481,6 @@ The report includes these sections (all linkable via `id`):
 - **Suite Breakdown** (`#suite-breakdown`) — every suite as a collapsible
   card (`#suite-{name}`), with nested case cards
   (`#suitecase-{suite_name}-{case_name}`).
-
-### Deep-dive root cause analysis
-
-After comparing, don't just report the deltas — **do root-cause dives** on the
-worst regressions. For each case with a significant score drop:
-
-1. Fetch the trace from both environments (see [Fetching OpenInference
-   traces](#4-fetching-openinference-traces)).
-2. Compare the traces side-by-side (`diff trace1.txt trace2.txt`) to find
-   where the agent's behaviour diverged.
-3. Check whether the failure is an infrastructure issue (tunnel drops,
-   rate limiting) or a real regression (wrong tool call, hallucinated
-   arguments, context window hit).
-
-**Use sub-agents in parallel.** When several cases regress, dispatch one
-sub-agent per pattern (not per case — one pattern spans multiple cases) to
-fetch traces, inspect evals, and summarise the root cause independently.
-This is much faster than serial investigation and each sub-agent's context
-stays focused on a single failure pattern.
 
 ### Verifying insights before publishing
 
