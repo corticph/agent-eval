@@ -60,6 +60,19 @@ uv run agent-evals sweep --env dev-weu  --tag "dev-weu-$(date +%Y%m%d-%H%M%S)"  
 wait
 ```
 
+> **Sweeps are long-running.** Run it as a background process and check in
+> every 2–4 minutes:
+>
+> ```bash
+> # Start in the background, capture output to a log
+> uv run agent-evals sweep --env dev-weu --tag "dev-weu-$(date +%Y%m%d-%H%M%S)" \
+>     > /tmp/sweep.log 2>&1 &
+> echo $!  # note the PID
+>
+> # Check progress
+> tail -20 /tmp/sweep.log
+> ```
+
 Key flags:
 - `--env` (required): environment to run against (local, staging-eu, eu, us, dev-weu)
 - `--evals-dir`: directory containing suite YAML files (default: `./evals`, then `../agent-eval-cases/evals`)
