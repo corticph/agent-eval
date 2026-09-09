@@ -156,6 +156,21 @@ def _build_parser() -> argparse.ArgumentParser:
     show_parser.add_argument("suite", type=str, help="Path to the suite YAML file")
     show_parser.set_defaults(handler=_handle_show)
 
+    sweep_parser = subparsers.add_parser(
+        "sweep",
+        parents=[verbosity],
+        help="Run every suite under an evals directory as a parallel sweep",
+    )
+    sweep_parser.add_argument("--env", type=str, required=True, help="Environment to run against.")
+    sweep_parser.add_argument("--evals-dir", type=str, default=None, help="Directory of suite YAML files (default: ./evals, then ../agent-eval-cases/evals).")
+    sweep_parser.add_argument("--suite", type=str, action="append", default=[], help="Substring filter for suite paths (repeatable).")
+    sweep_parser.add_argument("--tag", type=str, action="append", default=[], help="Tag for all Opik experiments (repeatable).")
+    sweep_parser.add_argument("-j", "--jobs", type=int, default=10, help="Max concurrent suites (default 10).")
+    sweep_parser.add_argument("--retries", type=int, default=2, help="Retry failed suites N times (default 2).")
+    sweep_parser.add_argument("--resume", action="store_true", help="Re-run only suites missing from Opik for the first --tag.")
+    sweep_parser.add_argument("--resume-file", type=str, default=None, help="Resume from an explicit file (one suite path per line).")
+    sweep_parser.set_defaults(handler=_handle_sweep)
+
     return parser
 
 
@@ -364,6 +379,22 @@ def _handle_show(args: argparse.Namespace) -> int:
     for case in suite.cases:
         print(case.name)
     return 0
+
+
+def _handle_sweep(args: argparse.Namespace) -> int:
+    """Delegate to the sweep script."""
+    from .scripts.sweep import run_sweep
+    return run_sweep(
+        env=args.env,
+        evals_dir=args.evals_dir,
+        suite_filters=args.suite,
+        tags=args.tag,
+        jobs=args.jobs,
+        retries=args.retries,
+        resume=args.resume,
+        resume_file=args.resume_file,
+        verbose=getattr(args, "verbose", 0),
+    )
 
 
 def _apply_runtime_overrides(suite: EvaluationSuite, args: argparse.Namespace) -> None:
