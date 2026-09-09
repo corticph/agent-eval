@@ -86,10 +86,14 @@ def _opik_list_experiments(client, name=None, limit=500):
 
 def _opik_get_items(client, experiment_id):
     """Fetch all experiment items by experiment id."""
-    return _retry(
-        lambda: client.get_experiment_by_id(experiment_id).get_items(),
-        what=f"get items {experiment_id[:8]}",
-    )
+    try:
+        return _retry(
+            lambda: client.get_experiment_by_id(experiment_id).get_items(),
+            what=f"get items {experiment_id[:8]}",
+        )
+    except Exception as exc:
+        print(f"Warning: could not fetch items for experiment {experiment_id[:8]}: {exc}", file=__import__('sys').stderr)
+        return []
 
 
 class DataSource:
