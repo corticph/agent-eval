@@ -104,6 +104,37 @@ resume" and exits 0.  Use `--resume-file <path>` to resume from an explicit
 file (one suite path per line, `#` comments supported) instead of querying
 Opik.
 
+#### Re-running suites that hit HTTP 502 (or other mid-eval failures)
+
+`--resume` **will not** re-run suites where 502 errors occurred mid-eval —
+the experiment already exists in Opik (it just has 0.0-scored cases).  To
+re-run only the affected suites, use `--resume-file` with **absolute
+paths**:
+
+```bash
+# 1. Create a file listing the affected suite files (absolute paths):
+cat > /tmp/rerun.txt <<EOF
+/path/to/agent-eval-cases/agent/evals/suite_name/case_a.yaml
+/path/to/agent-eval-cases/agent/evals/suite_name/case_b.yaml
+EOF
+
+# 2. Re-run with a new tag (so the new results are the ones picked up):
+bash run_all_evals.sh --env dev-weu --evals-dir /path/to/evals \
+    --tag "dev-weu-$(date +%Y%m%d-%H%M%S)" --resume-file /tmp/rerun.txt
+```
+
+**Pitfalls to avoid:**
+- **Use absolute paths** in `--resume-file`.  Relative paths are resolved
+  from the current working directory, not the `--evals-dir`, and silently
+  skip with a "no longer exists" warning.
+- **Don't use `--suite` to target specific suites** for re-runs — it's a
+  substring filter that matches all suites containing that substring (e.g.
+  `--suite foo` re-runs all suites containing "foo", not just the ones that 502'd).
+- **Use a new tag** for the re-run so the report generator's "newest per
+  suite" merge picks up the fresh results instead of the 502'd ones.
+- Alternatively, run individual suite files directly with
+  `uv run agent-evals run <path> --env dev-weu --opik --tag <tag>`.
+
 ## 2. Comparing experiments
 
 Use `compare_experiments` to find evals with the biggest score differences
@@ -278,13 +309,114 @@ each sub-agent's context stays focused on a single failure.
 # inspect_eval, and report back with a short root-cause summary.
 ```
 
-## 4. Generating eval reports
+## 5. Generating eval reports
 
 When the user asks for a report of eval results, follow the style guide in
 [`eval-report-style.md`](eval-report-style.md). It captures layout, theme, and
 UX preferences for self-contained HTML reports.
 
-## 5. Linking the evals directory
+The report generator (`agent_evals.scripts.generate_report`) is an **example
+script** — adapt the categorization, styling, and layout to your own workflow.
+It produces the report in two steps:
+
+```bash
+# 1. Generate the report from Opik data (supports multiple tags per side,
+#    newest experiment per suite name wins):
+uv run python -m agent_evals.scripts.generate_report generate \
+    --tag1 <baseline-tag> --tag2 <beta-tag> \
+    --label1 "baseline" --label2 "beta" \
+    -o report.html
+
+# 2. Inspect the report, find element IDs you want to link to
+#    (e.g. #rca-timeout, #case-no-data-parts-my_case, #imp-my_case)
+
+# 3. Write author insights as HTML (insights.html) with <a href="#..."> links
+#    to specific sections/cases, then inject:
+uv run python -m agent_evals.scripts.generate_report add-insights \
+    -o report.html --insights insights.html
+```
+
+### Report structure
+
+The report includes these sections (all linkable via `id`):
+
+- **Summary line** — mean scores, delta, regressed/improved/unchanged counts,
+  credit totals.
+- **Insights** (`#insights`) — author-written HTML with links to specific
+  cases and sections. Open by default. Injected via `add-insights`.
+- **Beta Changes Context** (`#beta-context`) — summary of what changed
+  between the two environments. Open by default.
+- **Root Cause Analysis** (`#root-cause-analysis`) — regressions grouped by
+  pattern. Each category is a collapsible (`#rca-{key}`) with a callout box
+  and nested case cards (`#case-{cat_key}-{case_name}`).
+- **Improvements** (`#improvements`) — all improved cases, collapsible.
+  Each case is linkable (`#imp-{case_name}`).
+- **Credit Usage by Suite** (`#credit-usage`) — per-suite credit table with
+  deltas and percentage change.
+- **Suite Breakdown** (`#suite-breakdown`) — every suite as a collapsible
+  card (`#suite-{name}`), with nested case cards
+  (`#suitecase-{suite_name}-{case_name}`).
+
+### Deep-dive root cause analysis
+
+After comparing, don't just report the deltas — **do root-cause dives** on the
+worst regressions. For each case with a significant score drop:
+
+1. Fetch the trace from both environments (see [Fetching OpenInference
+   traces](#4-fetching-openinference-traces)).
+2. Compare the traces side-by-side (`diff trace1.txt trace2.txt`) to find
+   where the agent's behaviour diverged.
+3. Check whether the failure is an infrastructure issue (tunnel drops,
+   rate limiting) or a real regression (wrong tool call, hallucinated
+   arguments, context window hit).
+
+**Use sub-agents in parallel.** When several cases regress, dispatch one
+sub-agent per pattern (not per case — one pattern spans multiple cases) to
+fetch traces, inspect evals, and summarise the root cause independently.
+This is much faster than serial investigation and each sub-agent's context
+stays focused on a single failure pattern.
+
+### Verifying insights before publishing
+
+Before injecting insights into the report, **verify every quantitative claim**
+against the data:
+
+1. **Run the comparison data through a script** (or `full_comparison.py`) to
+   get exact counts: total cases, suites, regressed/improved/unchanged,
+   credits, mean scores. Do not round or approximate from memory.
+2. **Categorize all regressions** programmatically — don't leave a large
+   "Other" bucket. If >10% of regressions are "other", the categorization
+   function in the report generator needs new patterns.
+3. **Verify cost claims**: count infrastructure-failure cases and their
+   credits separately. Do not estimate "roughly X% of the reduction" —
+   compute it: `infra_credits / abs(credit_delta) * 100`.
+4. **Check that insight links resolve**: every `#rca-*`, `#case-*`,
+   `#imp-*`, `#suite-*` href in the insights HTML must match an `id` in
+   the generated report. After `add-insights`, grep for `href="#` and
+   verify each target exists.
+5. **Re-run insights after re-runs**: if you re-run failed suites with new
+   tags, regenerate the report and re-inject insights. Old insights will
+   have stale numbers (e.g. "17 cases hit 502" when they've been re-run).
+
+### Cost analysis
+
+Each Opik experiment item carries a `usage.credits` field in its task
+output. The report extracts this per case and aggregates per suite. The
+credit usage table shows both sides' totals and the percentage change,
+making it easy to see whether the beta is more or less expensive than
+the baseline.
+
+**When reporting credit reductions**, distinguish between:
+- **Efficiency gains**: cases that ran successfully on both sides but
+  consumed fewer credits on the beta (leaner history, fewer LLM calls).
+- **Infrastructure failures**: cases that failed on the beta (502,
+  timeout, connection error) and consumed ~0 credits. These inflate the
+  reduction but are not real savings.
+- Compute `infra_credits / abs(total_credit_delta) * 100` to quantify
+  the infrastructure contribution before claiming the reduction is from
+  efficiency.
+
+## 6. Linking the evals directory
 
 This repo is the eval harness only. The suite YAML files, expectations, and
 fixtures live in a separate cases repo. The scripts look for them in this
