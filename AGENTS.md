@@ -19,7 +19,7 @@ are score drops from newer vs older; improvements are score gains.
 
 ## 1. Running eval sweeps
 
-Use `run_all_evals.sh` to run every suite against an environment. Each suite
+Use `agent-evals sweep` to run every suite against an environment. Each suite
 becomes a separate Opik experiment. Tag sweeps to group them for comparison
 later.
 
@@ -41,7 +41,7 @@ Use **timestamp-based tags** so every sweep gets a unique, sortable tag:
 Generate the tag at sweep start:
 ```bash
 TAG="$(date +%Y%m%d-%H%M%S)"
-bash run_all_evals.sh --env staging-eu --tag "staging-eu-${TAG}"
+uv run agent-evals sweep --env staging-eu --tag "staging-eu-${TAG}"
 ```
 
 This makes it trivial to compare runs across environments and avoids tag
@@ -49,14 +49,14 @@ collisions when running sweeps in parallel.
 
 ```bash
 # Run all suites against local, tagged for later comparison
-bash run_all_evals.sh --env local --tag "local-$(date +%Y%m%d-%H%M%S)" --jobs 1
+uv run agent-evals sweep --env local --tag "local-$(date +%Y%m%d-%H%M%S)" --jobs 1
 
 # Run against staging-eu with a timestamped tag
-bash run_all_evals.sh --env staging-eu --tag "staging-eu-$(date +%Y%m%d-%H%M%S)"
+uv run agent-evals sweep --env staging-eu --tag "staging-eu-$(date +%Y%m%d-%H%M%S)"
 
 # Run two environments in parallel with unique tags
-bash run_all_evals.sh --env staging-eu --tag "staging-eu-$(date +%Y%m%d-%H%M%S)" &
-bash run_all_evals.sh --env dev-weu  --tag "dev-weu-$(date +%Y%m%d-%H%M%S)"  &
+uv run agent-evals sweep --env staging-eu --tag "staging-eu-$(date +%Y%m%d-%H%M%S)" &
+uv run agent-evals sweep --env dev-weu  --tag "dev-weu-$(date +%Y%m%d-%H%M%S)"  &
 wait
 ```
 
@@ -72,11 +72,15 @@ Key flags:
 - Extra args after the flags are forwarded to `agent-evals run` (e.g. `-v`, `--runs 3`)
 
 > **Parallel sweeps share the Opik tunnel.** The first sweep to finish will
-> leave the tunnel running if other `run_all_evals.sh` processes are still
-> active, so the second sweep's Opik uploads are not interrupted.
+> leave the tunnel running if other sweep processes are still active, so
+> the second sweep's Opik uploads are not interrupted.
 
-The script pre-warms the kubectl tunnel to Opik before launching suites. All
+The command pre-warms the kubectl tunnel to Opik before launching suites. All
 runs include `--opik` so results land in Opik automatically.
+
+> **Thin shell wrappers** `run_all_evals.sh` and `run_eval.sh` are kept as
+> one-line wrappers for muscle memory — they just forward to `agent-evals
+> sweep` and `agent-evals run` respectively.
 
 ### Resuming failed suites
 
@@ -90,13 +94,13 @@ not infrastructure failures).
 
 ```bash
 # First sweep: some suites fail (rate-limiting, tunnel drops, etc.)
-bash run_all_evals.sh --env eu --tag "eu-$(date +%Y%m%d-%H%M%S)"
+uv run agent-evals sweep --env eu --tag "eu-$(date +%Y%m%d-%H%M%S)"
 
 # Resume only the missing suites (same env + tag so Opik groups them together)
-bash run_all_evals.sh --env eu --tag "eu-20260907-120000" --resume
+uv run agent-evals sweep --env eu --tag "eu-20260907-120000" --resume
 
 # Repeat until "Nothing to resume"
-bash run_all_evals.sh --env eu --tag "eu-20260907-120000" --resume
+uv run agent-evals sweep --env eu --tag "eu-20260907-120000" --resume
 ```
 
 When all suites have experiments in Opik, `--resume` prints "Nothing to
@@ -119,7 +123,7 @@ cat > /tmp/rerun.txt <<EOF
 EOF
 
 # 2. Re-run with a new tag (so the new results are the ones picked up):
-bash run_all_evals.sh --env dev-weu --evals-dir /path/to/evals \
+uv run agent-evals sweep --env dev-weu --evals-dir /path/to/evals \
     --tag "dev-weu-$(date +%Y%m%d-%H%M%S)" --resume-file /tmp/rerun.txt
 ```
 
@@ -279,7 +283,7 @@ diff trace1.txt trace2.txt
 
 ## Typical workflow
 
-1. Tag and run a sweep: `bash run_all_evals.sh --env local --tag "local-$(date +%Y%m%d-%H%M%S)"`
+1. Tag and run a sweep: `uv run agent-evals sweep --env local --tag "local-$(date +%Y%m%d-%H%M%S)"`
 2. Compare against a baseline: `uv run python -m agent_evals.scripts.compare_experiments --name <suite-prefix> --tag1 local-20260904-120000 --tag2 local-20260904-140612 --show-reason --sort regression`
 3. Inspect failures: `uv run python -m agent_evals.scripts.inspect_eval --exp <id> --case <case-name>`
 4. Fetch the trace to understand the agent's reasoning: `uv run python -m agent_evals.scripts.fetch_traces --exp <id> --case <case-name>`
@@ -441,6 +445,6 @@ The symlink is gitignored (see `.gitignore`), so it won't be committed.
 
 **Point at an arbitrary path** (ad-hoc / CI):
 ```bash
-bash run_all_evals.sh --env local --evals-dir /path/to/my-evals
-bash run_eval.sh smoke/hello --env local --evals-dir /path/to/my-evals
+uv run agent-evals sweep --env local --evals-dir /path/to/my-evals
+uv run agent-evals run smoke/hello --env local --evals-dir /path/to/my-evals
 ```
