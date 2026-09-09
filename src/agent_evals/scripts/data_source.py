@@ -140,7 +140,7 @@ class OpikSource(DataSource):
     """
 
     def __init__(self, results_dir: Path | list[Path] | None = None) -> None:
-        self._client = _make_opik_client()
+        self._client = None
         if results_dir is None:
             results_dir = [Path("results")]
         elif isinstance(results_dir, (list, tuple)):
@@ -148,6 +148,12 @@ class OpikSource(DataSource):
         else:
             results_dir = [Path(results_dir)]
         self._local = LocalSource([d for d in results_dir if d.is_dir()]) if any(d.is_dir() for d in results_dir) else None
+
+    def _ensure_client(self):
+        """Lazily create the Opik client only when local cache misses."""
+        if self._client is None:
+            self._client = _make_opik_client()
+        return self._client
 
     def list_experiments(
         self, *, name: str | None = None, env: str | None = None,
@@ -159,7 +165,8 @@ class OpikSource(DataSource):
             if local_exps:
                 return local_exps
         # Fall back to Opik API.
-        exps = _opik_list_experiments(self._client, name=name, limit=limit)
+        client = self._ensure_client()
+        exps = _opik_list_experiments(client, name=name, limit=limit)
         if env is not None:
             exps = [e for e in exps if (e.metadata or {}).get("environment") == env]
         if tag is not None:
@@ -179,7 +186,7 @@ class OpikSource(DataSource):
         # If the experiment ID is a local file path, read from local cache.
         if self._local is not None and str(exp.id).endswith(".json"):
             return self._local.get_items(exp)
-        return _opik_get_items(self._client, exp.id)
+        return _opik_get_items(self._ensure_client(), exp.id)
 
 
 class LocalSource(DataSource):
