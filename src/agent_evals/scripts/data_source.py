@@ -7,11 +7,89 @@ work with either source via ``--source opik`` (default) or ``--source local``.
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import dotenv
+
 from . import local_store
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+dotenv.load_dotenv(_REPO_ROOT / ".env")
+
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 2.0
+
+
+def _make_opik_client():
+    """Create an Opik client (lazy import so local-only runs never need it)."""
+    import opik
+    from ..environment import OPIK_URL_OVERRIDE_VAR
+    from ..reporting.opik_target import resolve_opik_url
+
+    url = resolve_opik_url()
+    os.environ.setdefault(OPIK_URL_OVERRIDE_VAR, url)
+    project = os.environ.get("OPIK_PROJECT_NAME") or "Agents"
+    os.environ["OPIK_PROJECT_NAME"] = project
+    return opik.Opik(
+        host=url, workspace="default",
+        api_key=os.environ.get("OPIK_API_KEY"),
+    )
+
+
+def _retry(fn, *, what: str):
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt == _MAX_RETRIES:
+                raise
+            wait = _RETRY_BACKOFF * attempt
+            print(f"  retry {attempt}/{_MAX_RETRIES} ({what}): {exc} — waiting {wait:.0f}s")
+            time.sleep(wait)
+
+
+def _opik_list_experiments(client, name=None, limit=500):
+    """List experiments from Opik."""
+    http = client._rest_client._client_wrapper.httpx_client
+    rows: list[SimpleNamespace] = []
+    page, size = 1, 100
+    while len(rows) < limit:
+        resp = _retry(
+            lambda: http.request(
+                "v1/private/experiments", method="GET",
+                params={"page": page, "size": size, "name": name, "dataset_deleted": False},
+            ),
+            what=f"list experiments page {page}",
+        )
+        resp.raise_for_status()
+        content = (resp.json() or {}).get("content") or []
+        if not content:
+            break
+        for d in content:
+            rows.append(SimpleNamespace(
+                id=d.get("id"), name=d.get("name"),
+                tags=d.get("tags") or [], created_at=d.get("created_at"),
+                metadata=d.get("metadata") or {},
+            ))
+            if len(rows) >= limit:
+                break
+        if len(content) < size:
+            break
+        page += 1
+    rows.sort(key=lambda e: e.created_at or "", reverse=True)
+    return rows
+
+
+def _opik_get_items(client, experiment_id):
+    """Fetch all experiment items by experiment id."""
+    return _retry(
+        lambda: client.get_experiment_by_id(experiment_id).get_items(),
+        what=f"get items {experiment_id[:8]}",
+    )
 
 
 class DataSource:
@@ -62,8 +140,7 @@ class OpikSource(DataSource):
     """
 
     def __init__(self, results_dir: Path | list[Path] | None = None) -> None:
-        from .compare_experiments import _make_client
-        self._client = _make_client()
+        self._client = _make_opik_client()
         if results_dir is None:
             results_dir = [Path("results")]
         elif isinstance(results_dir, (list, tuple)):
@@ -82,10 +159,9 @@ class OpikSource(DataSource):
             if local_exps:
                 return local_exps
         # Fall back to Opik API.
-        from .compare_experiments import _list_experiments, _env_of
-        exps = _list_experiments(self._client, name=name, limit=limit)
+        exps = _opik_list_experiments(self._client, name=name, limit=limit)
         if env is not None:
-            exps = [e for e in exps if _env_of(e) == env]
+            exps = [e for e in exps if (e.metadata or {}).get("environment") == env]
         if tag is not None:
             exps = [e for e in exps if self.has_tag(e, tag)]
         by_name: dict[str, SimpleNamespace] = {}
@@ -103,8 +179,7 @@ class OpikSource(DataSource):
         # If the experiment ID is a local file path, read from local cache.
         if self._local is not None and str(exp.id).endswith(".json"):
             return self._local.get_items(exp)
-        from .compare_experiments import _get_items
-        return _get_items(self._client, exp.id)
+        return _opik_get_items(self._client, exp.id)
 
 
 class LocalSource(DataSource):

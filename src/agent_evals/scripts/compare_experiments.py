@@ -358,8 +358,34 @@ def main() -> None:
         )
         return
 
+    # Tag-only mode: --tag1/--tag2 without --name (matches all suites)
+    if not args.name and args.tag1 and args.tag2:
+        if args.exp1 or args.exp2:
+            raise SystemExit("Cannot use --exp1/--exp2 with --tag1/--tag2.")
+        label1 = args.tag1
+        label2 = args.tag2
+        exps1 = _find_by_selector(
+            source, name=None, env=args.env1, tag=args.tag1,
+            label="side1", limit=args.limit,
+        )
+        exps2 = _find_by_selector(
+            source, name=None, env=args.env2, tag=args.tag2,
+            label="side2", limit=args.limit,
+        )
+        matched = sorted(set(exps1) & set(exps2))
+        print(
+            f"\nside1 = {label1}  ({len(exps1)} experiments)"
+            f"    side2 = {label2}  ({len(exps2)} experiments)"
+            f"    matched: {len(matched)}"
+        )
+        rows, only1, only2 = _build_rows(source, exps1, exps2, args.score)
+        _sort_rows(rows, args.sort)
+        _print_summary(rows, args.score, args.sort, only1, only2, label1, label2)
+        _print_detail(rows, args.n, args.show_reason, args.show_trace)
+        return
+
     # Discovery mode: name substring + two selectors (env and/or tag)
-    if args.name is not None and args.name:
+    if args.name is not None:
         if not (args.env1 or args.tag1) or not (args.env2 or args.tag2):
             raise SystemExit(
                 "Discovery mode requires --env1/--tag1 and --env2/--tag2 "
