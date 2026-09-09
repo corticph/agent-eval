@@ -187,20 +187,24 @@ def _auto_output_path(suite_path: Path, environment: str | None = None) -> Path:
 
     For example ``evals/interviewing/single.yaml`` with env ``eu`` produces
     ``results/interviewing/single_20260414_120000_eu.json``.
+
+    Uses ``absolute()`` (not ``resolve()``) so that a symlinked ``evals/``
+    directory keeps results in the repo root, not in the symlink target's
+    parent.
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     env_suffix = f"_{environment}" if environment else ""
-    resolved = suite_path.resolve()
+    abs_path = suite_path.absolute()
 
     # Walk parents to find the 'evals' directory so we can mirror the relative path.
-    for parent in resolved.parents:
+    for parent in abs_path.parents:
         if parent.name == "evals":
-            rel = resolved.relative_to(parent)
+            rel = abs_path.relative_to(parent)
             results_dir = parent.parent / "results"
             return results_dir / rel.parent / f"{rel.stem}_{timestamp}{env_suffix}.json"
 
     # Fallback: put results next to the suite file.
-    return resolved.parent / "results" / f"{resolved.stem}_{timestamp}{env_suffix}.json"
+    return abs_path.parent / "results" / f"{abs_path.stem}_{timestamp}{env_suffix}.json"
 
 
 def _resolve_suite_paths(suite_arg: str) -> list[Path]:

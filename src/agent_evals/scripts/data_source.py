@@ -52,16 +52,36 @@ class DataSource:
 
 
 class OpikSource(DataSource):
-    """Data source backed by Opik (the default)."""
+    """Data source backed by Opik, with local-cache-first.
 
-    def __init__(self) -> None:
+    When a ``results_dir`` is provided, ``list_experiments`` and ``get_items``
+    check local JSON files first.  If local results exist for the requested
+    tag (or experiment), they are used instead of hitting the Opik API.
+    This avoids expensive Opik fetches for recent runs whose JSON is still
+    on disk.
+    """
+
+    def __init__(self, results_dir: Path | list[Path] | None = None) -> None:
         from .compare_experiments import _make_client
         self._client = _make_client()
+        if results_dir is None:
+            results_dir = [Path("results")]
+        elif isinstance(results_dir, (list, tuple)):
+            results_dir = [Path(d) for d in results_dir]
+        else:
+            results_dir = [Path(results_dir)]
+        self._local = LocalSource([d for d in results_dir if d.is_dir()]) if any(d.is_dir() for d in results_dir) else None
 
     def list_experiments(
         self, *, name: str | None = None, env: str | None = None,
         tag: str | None = None, limit: int = 500,
     ) -> dict[str, SimpleNamespace]:
+        # Try local cache first when searching by tag.
+        if self._local is not None and tag is not None:
+            local_exps = self._local.list_experiments(name=name, env=env, tag=tag, limit=limit)
+            if local_exps:
+                return local_exps
+        # Fall back to Opik API.
         from .compare_experiments import _list_experiments, _env_of
         exps = _list_experiments(self._client, name=name, limit=limit)
         if env is not None:
@@ -80,6 +100,9 @@ class OpikSource(DataSource):
         return chosen
 
     def get_items(self, exp: SimpleNamespace) -> list:
+        # If the experiment ID is a local file path, read from local cache.
+        if self._local is not None and str(exp.id).endswith(".json"):
+            return self._local.get_items(exp)
         from .compare_experiments import _get_items
         return _get_items(self._client, exp.id)
 
@@ -127,9 +150,10 @@ class LocalSource(DataSource):
 def make_source(source: str = "opik", *, results_dir: str | list[str] | None = None) -> DataSource:
     """Create a data source by name.
 
-    ``opik`` (default) connects to Opik.  ``local`` reads from
-    ``results_dir`` (default: ``results/``).  ``results_dir`` may be a
-    single path or a list of paths to scan multiple directories.
+    ``opik`` (default) connects to Opik but checks local results first when
+    a ``results_dir`` is available (local-cache-first).  ``local`` reads
+    exclusively from ``results_dir`` (default: ``results/``).  ``results_dir``
+    may be a single path or a list of paths to scan multiple directories.
     """
     if source == "local":
         if isinstance(results_dir, list):
@@ -146,4 +170,13 @@ def make_source(source: str = "opik", *, results_dir: str | list[str] | None = N
                 f"None of [{dir_list}] exist. Pass --results-dir <path>."
             )
         return LocalSource(found)
-    return OpikSource()
+    # Opik with local-cache-first: pass results_dir so OpikSource can check
+    # local JSON files before hitting the API.
+    if results_dir:
+        if isinstance(results_dir, list):
+            dirs = [Path(d) for d in results_dir]
+        else:
+            dirs = [Path(results_dir)]
+    else:
+        dirs = [Path("results")]
+    return OpikSource(dirs)

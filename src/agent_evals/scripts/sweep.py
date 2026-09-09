@@ -31,14 +31,23 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _discover_suites(evals_dir: Path, suite_filters: list[str]) -> list[Path]:
-    """Find all suite YAML files under *evals_dir*, applying substring filters."""
-    all_suites = sorted(
-        p
-        for p in evals_dir.rglob("*.yaml")
-        if not p.name.startswith("_")
-        and not p.name.endswith("_local.yaml")
-        and p.stat().st_size > 0
-    )
+    """Find all suite YAML files under *evals_dir*, applying substring filters.
+
+    Handles symlinked subdirectories (``rglob`` does not follow directory
+    symlinks on some Python versions, so we glob within each child).
+    """
+    all_suites: list[Path] = []
+    for p in evals_dir.rglob("*.yaml"):
+        if not p.name.startswith("_") and not p.name.endswith("_local.yaml") and p.stat().st_size > 0:
+            all_suites.append(p)
+    # Also check immediate subdirectories that are symlinks (rglob skips them).
+    for d in evals_dir.iterdir():
+        if d.is_dir() and d.is_symlink():
+            for p in d.rglob("*.yaml"):
+                if not p.name.startswith("_") and not p.name.endswith("_local.yaml") and p.stat().st_size > 0:
+                    if p not in all_suites:
+                        all_suites.append(p)
+    all_suites.sort()
     if suite_filters:
         all_suites = [
             p for p in all_suites if any(pat in str(p) for pat in suite_filters)
