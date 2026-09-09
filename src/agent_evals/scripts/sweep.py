@@ -211,6 +211,11 @@ def run_sweep(
                 raise SystemExit(f"No suite files matched the --suite filter(s): {suite_filters}")
             raise SystemExit(f"No suite files found under {evals_dir_path}")
 
+    if verbose:
+        print(f"Suites to run ({len(suites)}):")
+        for p in suites:
+            print(f"  {p}")
+
     # --- build extra args for agent-evals run ---
     run_extra_args: list[str] = []
     for tag in tags:
@@ -224,7 +229,7 @@ def run_sweep(
     print(f"Running {len(suites)} suite(s) against {env} (jobs={jobs}, retries={retries})")
 
     if jobs <= 1:
-        # Sequential: print output in real time.
+        # Sequential: capture output per-suite and print when it completes.
         failed = 0
         for suite_path in suites:
             name, rc, output = _run_one_suite(suite_path, env, run_extra_args, retries)

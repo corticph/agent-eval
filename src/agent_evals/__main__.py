@@ -169,6 +169,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sweep_parser.add_argument("--retries", type=int, default=2, help="Retry failed suites N times (default 2).")
     sweep_parser.add_argument("--resume", action="store_true", help="Re-run only suites missing from Opik for the first --tag.")
     sweep_parser.add_argument("--resume-file", type=str, default=None, help="Resume from an explicit file (one suite path per line).")
+    sweep_parser.add_argument("extra", nargs=argparse.REMAINDER, help="Extra args forwarded to agent-evals run (e.g. -v, --runs 3, --stop-on-failure).")
     sweep_parser.set_defaults(handler=_handle_sweep)
 
     return parser
@@ -393,6 +394,7 @@ def _handle_sweep(args: argparse.Namespace) -> int:
         retries=args.retries,
         resume=args.resume,
         resume_file=args.resume_file,
+        extra_args=list(args.extra) if args.extra else None,
         verbose=getattr(args, "verbose", 0),
     )
 
