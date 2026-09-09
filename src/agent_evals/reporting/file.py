@@ -26,6 +26,8 @@ class FileSink:
         path: Path,
         *,
         trace_base_url: str | None = None,
+        tags: list[str] | None = None,
+        env: str | None = None,
     ) -> None:
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,6 +36,8 @@ class FileSink:
         # Already fully resolved by the Environment; None means the
         # environment has no trace destination (local) and links are omitted.
         self._trace_base_url = trace_base_url
+        self._tags = tags or []
+        self._env = env
 
     def on_start(self, suite: "EvaluationSuite") -> None:
         """Nothing to prepare: the constructor already claimed the output directory."""
@@ -74,8 +78,16 @@ class FileSink:
 
     def close(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        output = list(self._results)
+        if self._tags or self._env:
+            meta: dict[str, Any] = {"_metadata": True}
+            if self._tags:
+                meta["tags"] = self._tags
+            if self._env:
+                meta["env"] = self._env
+            output.insert(0, meta)
         with self.path.open("w", encoding="utf-8") as handle:
-            json.dump(self._results, handle, ensure_ascii=False, indent=2)
+            json.dump(output, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
         self._write_markdown()
 

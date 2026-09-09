@@ -64,9 +64,10 @@ Key flags:
 - `--env` (required): environment to run against (local, staging-eu, eu, us, dev-weu)
 - `--evals-dir`: directory containing suite YAML files (default: `./evals`, then `../agent-eval-cases/evals`)
 - `--suite`: substring filter for suite paths (repeatable)
-- `--tag`: tag all Opik experiments in the sweep (repeatable, forwarded to `--opik`)
+- `--tag`: tag experiments in the sweep (repeatable, stored in Opik tags or local JSON metadata)
 - `-j / --jobs`: max concurrent suites (default 10, use 1 for sequential; failed suites can be resumed with `--resume`)
 - `--retries`: retry failed suites N times (default 2; the kubectl tunnel drops connections under load but recovers fast)
+- `--no-opik`: skip Opik recording and tunnel (write local JSON only; tags are still stored in JSON metadata)
 - `--resume`: re-run only suites missing from Opik for the first `--tag` (queries Opik, compares against the full suite list, runs the ones without an experiment); requires `--tag`
 - `--resume-file <path>`: resume from an explicit failed-suites file instead of querying Opik
 - Extra args after the flags are forwarded to `agent-evals run` (e.g. `-v`, `--runs 3`)
@@ -81,6 +82,53 @@ runs include `--opik` so results land in Opik automatically.
 > **Thin shell wrappers** `run_all_evals.sh` and `run_eval.sh` are kept as
 > one-line wrappers for muscle memory — they just forward to `agent-evals
 > sweep` and `agent-evals run` respectively.
+
+### Running locally (without Opik)
+
+Add `--no-opik` to any sweep to skip Opik recording and write results to
+`results/*.json` only. Tags are persisted in the JSON metadata, so you can
+compare local runs the same way you compare Opik runs.
+
+**Results directory**: results are written alongside the evals directory
+(e.g. `--evals-dir ../agent-eval-cases/evals` writes to
+`../agent-eval-cases/results/`).  When comparing local results, pass
+`--results-dir` to point the local source at the right location.
+
+```bash
+# Run sweep locally with a tag
+uv run agent-evals sweep --env local --tag "local-$(date +%Y%m%d-%H%M%S)" --no-opik
+
+# Or via the shell wrapper
+bash run_all_evals.sh --env staging-eu --tag "staging-eu-$(date +%Y%m%d-%H%M%S)" --no-opik --jobs 2
+
+# Compare two local sweeps by tag (no --name needed — matches all suites)
+uv run python -m agent_evals.scripts.compare_experiments \
+    --source local --tag1 local-20260909-120000 --tag2 local-20260909-140000 \
+    --sort regression
+
+# Or with results in a sibling cases repo
+uv run python -m agent_evals.scripts.compare_experiments \
+    --source local --results-dir ../agent-eval-cases/results \
+    --tag1 tag-a --tag2 tag-b --sort regression
+
+# Or scan multiple result directories (newest per suite wins)
+uv run python -m agent_evals.scripts.compare_experiments \
+    --source local \
+    --results-dir results --results-dir ../agent-eval-cases/results \
+    --tag1 tag-a --tag2 tag-b --sort regression
+```
+
+The `--source local` flag is supported on all three comparison scripts:
+`compare_experiments`, `inspect_eval`, and `generate_report`.  Without it,
+they default to Opik (`--source opik`).
+
+- **compare_experiments**: discover experiments by tag or environment, compare scores
+- **inspect_eval**: with `--exp` set to a local file path (e.g. `results/smoke/hello.json`)
+- **generate_report**: generate HTML reports from local JSON using `--source local`
+
+Each result JSON file starts with a `_metadata` entry carrying tags and
+environment.  Results without one (written before this feature) still work
+via substring matching on file paths.
 
 ### Resuming failed suites
 
@@ -160,15 +208,33 @@ uv run python -m agent_evals.scripts.compare_experiments \
 uv run python -m agent_evals.scripts.compare_experiments \
     --exp1 01a0672b-... --exp2 01a06729-...
 
+# Compare local results by tag (no --name needed — matches all suites)
+uv run python -m agent_evals.scripts.compare_experiments \
+    --source local --tag1 local-20260909-120000 --tag2 local-20260909-140000 \
+    --sort regression
+
+# Or with results in a sibling cases repo
+uv run python -m agent_evals.scripts.compare_experiments \
+    --source local --results-dir ../agent-eval-cases/results \
+    --tag1 tag-a --tag2 tag-b --sort regression
+
+# Or scan multiple result directories (newest per suite wins)
+uv run python -m agent_evals.scripts.compare_experiments \
+    --source local \
+    --results-dir results --results-dir ../agent-eval-cases/results \
+    --tag1 tag-a --tag2 tag-b --sort regression
+
 # List available experiments to find IDs
 uv run python -m agent_evals.scripts.compare_experiments --list --name <suite-prefix>
 ```
 
 Key flags:
-- `--name`: experiment name substring (matches all suites with that prefix)
-- `--tag1 / --tag2`: filter each side by Opik tag
+- `--name`: experiment name substring (omit to match all suites in tag-only mode)
+- `--tag1 / --tag2`: filter each side by tag
 - `--env1 / --env2`: filter each side by environment (from experiment metadata)
 - `--exp1 / --exp2`: direct experiment IDs (bypasses discovery)
+- `--source`: `opik` (default) or `local` (uses `results/*.json`)
+- `--results-dir`: path to results directory for local source (repeatable, default: `results/`). Use this when results live outside this repo (e.g. `../agent-eval-cases/results/`).
 - `--score`: feedback score to compare (default: `overall`; also `must_include`, `expected_state`, `judge`, etc.)
 - `--sort`: `delta` (biggest absolute change, default), `regression` (worst first), `improvement` (best first)
 - `--n`: number of items to show (default 20)
@@ -203,6 +269,10 @@ uv run python -m agent_evals.scripts.inspect_eval \
 uv run python -m agent_evals.scripts.inspect_eval \
     --exp 01a0672b-4234-7b58-bb27-0d4b048c4a2b \
     --case allergies_then_labs_two_round_trips --show-agent
+
+# With local source, --exp is a file path:
+uv run python -m agent_evals.scripts.inspect_eval \
+    --source local --exp results/smoke/hello.json --case my_case
 ```
 
 The output is structured as:
@@ -211,6 +281,7 @@ The output is structured as:
 - **FEEDBACK SCORES**: all scores (overall + per-expectation-type) with reasons
 
 The `--exp` ID comes from the Opik UI or the `--list` output of `compare_experiments`.
+For local source, `--exp` is a file path (e.g. `results/smoke/hello.json`).
 
 ## 4. Fetching OpenInference traces
 

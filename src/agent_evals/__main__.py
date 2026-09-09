@@ -140,7 +140,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--tag",
         type=str,
         action="append",
-        help="Tag the Opik experiment for grouping runs (repeatable); only with --opik",
+        help="Tag the experiment for grouping runs (repeatable).  Stored in local JSON metadata, or sent to Opik with --opik.",
+    )
+    run_parser.add_argument(
+        "--model",
+        type=str,
+        help="Override the LLM model for all agents in the suite",
     )
     run_parser.add_argument(
         "--runs",
@@ -169,6 +174,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sweep_parser.add_argument("--retries", type=int, default=2, help="Retry failed suites N times (default 2).")
     sweep_parser.add_argument("--resume", action="store_true", help="Re-run only suites missing from Opik for the first --tag.")
     sweep_parser.add_argument("--resume-file", type=str, default=None, help="Resume from an explicit file (one suite path per line).")
+    sweep_parser.add_argument("--model", type=str, default=None, help="Override the LLM model for all agents in the sweep.")
+    sweep_parser.add_argument("--no-opik", action="store_true", help="Skip Opik recording and tunnel (write local JSON only).")
     sweep_parser.add_argument("extra", nargs=argparse.REMAINDER, help="Extra args forwarded to agent-evals run (e.g. -v, --runs 3, --stop-on-failure).")
     sweep_parser.set_defaults(handler=_handle_sweep)
 
@@ -239,8 +246,8 @@ def _handle_run(args: argparse.Namespace) -> int:
     environment = resolve_environment(args.env)
     # The name overrides only reach the Opik sink, so a bare run silently
     # dropping them would betray the help text — reject them loudly instead.
-    if not args.opik and (args.dataset_name or args.experiment_name or args.tag):
-        raise SystemExit("--dataset-name, --experiment-name, and --tag require --opik.")
+    if not args.opik and (args.dataset_name or args.experiment_name):
+        raise SystemExit("--dataset-name and --experiment-name require --opik.")
     suite_paths = _resolve_suite_paths(args.suite)
     # Resolved once, before any suite runs: a missing extra aborts here rather
     # than after the first suite's messages have already gone out.
@@ -332,7 +339,12 @@ def _run_single_suite(
         else:
             per_run_path = output_path
         sinks: list[Sink] = [
-            FileSink(per_run_path, trace_base_url=environment.trace_base_url)
+            FileSink(
+                per_run_path,
+                trace_base_url=environment.trace_base_url,
+                tags=getattr(args, "tag", None),
+                env=environment.name,
+            )
         ]
         if make_opik_sink is not None:
             sinks.append(make_opik_sink())
@@ -394,8 +406,10 @@ def _handle_sweep(args: argparse.Namespace) -> int:
         retries=args.retries,
         resume=args.resume,
         resume_file=args.resume_file,
+        model=args.model,
         extra_args=list(args.extra) if args.extra else None,
         verbose=getattr(args, "verbose", 0),
+        use_opik=not getattr(args, "no_opik", False),
     )
 
 
@@ -404,6 +418,10 @@ def _apply_runtime_overrides(suite: EvaluationSuite, args: argparse.Namespace) -
         suite.options.stop_on_failure = True
     if getattr(args, "concurrency", None):
         suite.options.concurrency = max(1, args.concurrency)
+    model = getattr(args, "model", None)
+    if model:
+        for case in suite.cases:
+            case.agent.model = model
     names = getattr(args, "name", None)
     if names:
         filtered = [e for e in suite.cases if e.name in names]

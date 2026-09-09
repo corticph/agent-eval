@@ -8,10 +8,17 @@ them loudly rather than silently ignoring stale invocations.
 
 from __future__ import annotations
 
+import argparse
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
+
 import pytest
 
-from agent_evals.__main__ import _build_parser, resolve_environment
+from agent_evals.__main__ import _apply_runtime_overrides, _build_parser, resolve_environment
 from agent_evals.environment import configuration_knobs
+from agent_evals.loader import EvaluationCase, EvaluationSuite, SuiteOptions, Step
+from agent_evals.schemas.agent import Agent
+from agent_evals.schemas.message import Message, MessagePayload, Part
 
 # The per-knob escape hatches deleted by the refactor, for both subcommands.
 # The old mode-selection flags (the purged namespace) are rejected the same
@@ -127,3 +134,46 @@ class TestResolveEnvironment:
         for offered in ("local", "eu", "us"):
             assert offered in message
         assert "staging-eu" not in message
+
+
+class TestRuntimeModelOverride:
+    """The --model flag overrides agent.model on every case after loading."""
+
+    def _make_suite(self) -> EvaluationSuite:
+        case = EvaluationCase(
+            name="test_case",
+            agent=Agent(name="my-agent", model="original-model"),
+            steps=[Step(message=MessagePayload(message=Message(parts=[Part(text="hello")])))],
+        )
+        return EvaluationSuite(name="test", cases=[case], options=SuiteOptions())
+
+    def _make_args(self, model: str | None = None) -> argparse.Namespace:
+        parser = _build_parser()
+        args = parser.parse_args(["run", "suite.yaml", "--env", "local"])
+        if model:
+            args.model = model
+        else:
+            args.model = None
+        args.stop_on_failure = False
+        args.concurrency = None
+        args.name = None
+        return args
+
+    def test_model_override_patches_agent_model(self) -> None:
+        suite = self._make_suite()
+        args = self._make_args("gpt-4o")
+        _apply_runtime_overrides(suite, args)
+        assert suite.cases[0].agent.model == "gpt-4o"
+
+    def test_no_model_flag_preserves_original_model(self) -> None:
+        suite = self._make_suite()
+        args = self._make_args()
+        _apply_runtime_overrides(suite, args)
+        assert suite.cases[0].agent.model == "original-model"
+
+    def test_model_override_works_when_original_is_none(self) -> None:
+        suite = self._make_suite()
+        suite.cases[0].agent.model = None
+        args = self._make_args("anthropic/claude-3")
+        _apply_runtime_overrides(suite, args)
+        assert suite.cases[0].agent.model == "anthropic/claude-3"
