@@ -20,7 +20,7 @@ from . import local_store
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 dotenv.load_dotenv(_REPO_ROOT / ".env")
 
-_MAX_RETRIES = 3
+_MAX_RETRIES = 1
 _RETRY_BACKOFF = 2.0
 
 
@@ -85,10 +85,31 @@ def _opik_list_experiments(client, name=None, limit=500):
 
 
 def _opik_get_items(client, experiment_id):
-    """Fetch all experiment items by experiment id."""
+    """Fetch all experiment items by experiment id.
+
+    Uses ``dataset_id`` directly (from ``get_experiment_data``) rather than
+    the SDK's ``Experiment.get_items()``, which resolves ``dataset_id`` from
+    ``dataset_name`` — a field that can be blank on some experiments.
+    """
     try:
+        from opik.api_objects.experiment import rest_operations
+
+        exp_data = _retry(
+            lambda: client.get_experiment_by_id(experiment_id).get_experiment_data(),
+            what=f"get experiment {experiment_id[:8]}",
+        )
+        dataset_id = getattr(exp_data, "dataset_id", None)
+        if not dataset_id:
+            print(f"Warning: experiment {experiment_id[:8]} has no dataset_id", file=__import__('sys').stderr)
+            return []
         return _retry(
-            lambda: client.get_experiment_by_id(experiment_id).get_items(),
+            lambda: rest_operations.find_experiment_items_for_dataset(
+                rest_client=client._rest_client,
+                dataset_id=dataset_id,
+                experiment_ids=[experiment_id],
+                max_results=10000,
+                truncate=False,
+            ),
             what=f"get items {experiment_id[:8]}",
         )
     except Exception as exc:

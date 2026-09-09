@@ -87,6 +87,30 @@ def _find_by_selector(
     return dict(exps)
 
 
+def _find_by_tags(
+    source: DataSource,
+    tags: list[str],
+    name: str | None,
+    *,
+    env: str | None = None,
+    label: str,
+    limit: int,
+) -> dict[str, SimpleNamespace]:
+    """Merge experiments from multiple tags, newest per suite name wins."""
+    merged: dict[str, SimpleNamespace] = {}
+    for tag in tags:
+        try:
+            found = _find_by_selector(source, name, env=env, tag=tag, label=label, limit=limit)
+        except SystemExit:
+            continue
+        for suite_name, exp in found.items():
+            if suite_name not in merged or (exp.created_at or "") > (merged[suite_name].created_at or ""):
+                merged[suite_name] = exp
+    if not merged:
+        raise SystemExit(f"{label}: no experiments found for tags={tags!r}.")
+    return merged
+
+
 # --- per-item helpers (moved to DataSource) ----------------------------------
 
 # --- comparison --------------------------------------------------------------
@@ -310,8 +334,8 @@ def main() -> None:
     parser.add_argument("--exp2", default=None, help="Experiment 2 ID (direct mode).")
     parser.add_argument("--env1", default=None, help="Environment for side 1 (discovery mode).")
     parser.add_argument("--env2", default=None, help="Environment for side 2 (discovery mode).")
-    parser.add_argument("--tag1", default=None, help="Tag for side 1 (discovery mode, alternative to --env1).")
-    parser.add_argument("--tag2", default=None, help="Tag for side 2 (discovery mode, alternative to --env2).")
+    parser.add_argument("--tag1", nargs="+", default=None, help="Tag(s) for side 1 (repeatable, newest per suite wins).")
+    parser.add_argument("--tag2", nargs="+", default=None, help="Tag(s) for side 2 (repeatable, newest per suite wins).")
     parser.add_argument(
         "--score",
         default=DEFAULT_SCORE,
@@ -362,16 +386,10 @@ def main() -> None:
     if not args.name and args.tag1 and args.tag2:
         if args.exp1 or args.exp2:
             raise SystemExit("Cannot use --exp1/--exp2 with --tag1/--tag2.")
-        label1 = args.tag1
-        label2 = args.tag2
-        exps1 = _find_by_selector(
-            source, name=None, env=args.env1, tag=args.tag1,
-            label="side1", limit=args.limit,
-        )
-        exps2 = _find_by_selector(
-            source, name=None, env=args.env2, tag=args.tag2,
-            label="side2", limit=args.limit,
-        )
+        label1 = " ".join(args.tag1) if isinstance(args.tag1, list) else args.tag1
+        label2 = " ".join(args.tag2) if isinstance(args.tag2, list) else args.tag2
+        exps1 = _find_by_tags(source, args.tag1, name=None, env=args.env1, label="side1", limit=args.limit)
+        exps2 = _find_by_tags(source, args.tag2, name=None, env=args.env2, label="side2", limit=args.limit)
         matched = sorted(set(exps1) & set(exps2))
         print(
             f"\nside1 = {label1}  ({len(exps1)} experiments)"
@@ -395,21 +413,23 @@ def main() -> None:
         if args.env1:
             sel1_parts.append(f"env={args.env1!r}")
         if args.tag1:
-            sel1_parts.append(f"tag={args.tag1!r}")
+            sel1_parts.append(f"tag={' '.join(args.tag1)!r}" if isinstance(args.tag1, list) else f"tag={args.tag1!r}")
         if args.env2:
             sel2_parts.append(f"env={args.env2!r}")
         if args.tag2:
-            sel2_parts.append(f"tag={args.tag2!r}")
+            sel2_parts.append(f"tag={' '.join(args.tag2)!r}" if isinstance(args.tag2, list) else f"tag={args.tag2!r}")
         label1 = f"{args.name!r} / {' '.join(sel1_parts)}"
         label2 = f"{args.name!r} / {' '.join(sel2_parts)}"
-        exps1 = _find_by_selector(
-            source, args.name, env=args.env1, tag=args.tag1,
-            label="side1", limit=args.limit,
-        )
-        exps2 = _find_by_selector(
-            source, args.name, env=args.env2, tag=args.tag2,
-            label="side2", limit=args.limit,
-        )
+        tags1 = args.tag1 if isinstance(args.tag1, list) else [args.tag1] if args.tag1 else None
+        tags2 = args.tag2 if isinstance(args.tag2, list) else [args.tag2] if args.tag2 else None
+        if tags1 and len(tags1) > 1:
+            exps1 = _find_by_tags(source, tags1, args.name, env=args.env1, label="side1", limit=args.limit)
+        else:
+            exps1 = _find_by_selector(source, args.name, env=args.env1, tag=tags1[0] if tags1 else None, label="side1", limit=args.limit)
+        if tags2 and len(tags2) > 1:
+            exps2 = _find_by_tags(source, tags2, args.name, env=args.env2, label="side2", limit=args.limit)
+        else:
+            exps2 = _find_by_selector(source, args.name, env=args.env2, tag=tags2[0] if tags2 else None, label="side2", limit=args.limit)
         matched = sorted(set(exps1) & set(exps2))
         print(
             f"\nside1 = {label1}  ({len(exps1)} experiments)"
