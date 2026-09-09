@@ -231,7 +231,7 @@ def run_sweep(
             print(output, end="")
             if rc != 0:
                 failed += 1
-        _print_summary(env, jobs, len(suites), failed)
+        _print_summary(env, jobs, len(suites), failed, tags)
         return 1 if failed else 0
 
     # Parallel: buffer output per-suite, print when done.
@@ -254,7 +254,7 @@ def run_sweep(
             if rc != 0:
                 failed += 1
 
-    _print_summary(env, jobs, total, failed)
+    _print_summary(env, jobs, total, failed, tags)
     return 1 if failed else 0
 
 
@@ -290,13 +290,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
 
-def _print_summary(env: str, jobs: int, total: int, failed: int) -> None:
+def _print_summary(env: str, jobs: int, total: int, failed: int, tags: list[str] | None = None) -> None:
     print()
     print("=" * 60)
     print(f"SUMMARY  env={env} jobs={jobs} suites={total}")
     if failed:
         print(f"  {failed} suite(s) FAILED")
-        print(f"  resume with: agent-evals sweep --env {env} --tag <tag> --resume")
+        if tags:
+            resume_tag = tags[0]
+            print(f"  check if any are resumable: agent-evals sweep --env {env} --tag {resume_tag} --resume")
+            print(f"  (or re-run with a new tag: agent-evals sweep --env {env} --tag \"{env}-$(date +%Y%m%d-%H%M%S)\"")
+        else:
+            print(f"  re-run with a tag: agent-evals sweep --env {env} --tag \"{env}-$(date +%Y%m%d-%H%M%S)\"")
     else:
         print("  all suites passed")
     print("=" * 60)
