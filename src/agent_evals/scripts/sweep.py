@@ -88,22 +88,23 @@ def _resume_from_opik(
     evals_dir: Path,
     suite_filters: list[str],
 ) -> list[Path]:
-    """Query Opik for suites missing from *tag* and return their file paths."""
-    from .resume_missing import _discover_suites as _discover
-    from .compare_experiments import _env_of, _has_tag, _list_experiments, _make_client
+    """Find suites missing from *tag* and return their file paths.
 
-    all_suites = _discover(evals_dir, suite_filters)
+    Checks local results first (local-cache-first); falls back to the Opik
+    API when no local results match the tag.
+    """
+    from .data_source import make_source
+
+    all_suites = _discover_suites(evals_dir, suite_filters)
     if not all_suites:
         return []
 
     name_to_path = {_suite_name(p): p for p in all_suites}
-    client = _make_client()
-    exps = _list_experiments(client, limit=5000)
-    exps = [e for e in exps if _has_tag(e, tag)]
-    if env:
-        exps = [e for e in exps if _env_of(e) == env]
 
-    found_names = {e.name for e in exps}
+    source = make_source("opik", results_dir="results")
+    found = source.list_experiments(tag=tag, env=env or None, limit=5000)
+
+    found_names = set(found.keys())
     missing = [p for name, p in sorted(name_to_path.items()) if name not in found_names]
     return missing
 

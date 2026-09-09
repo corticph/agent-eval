@@ -1,17 +1,17 @@
-"""Find suites missing from Opik for a given tag.
+"""Find suites missing from a given tag.
 
-Used by ``run_all_evals.sh --resume`` to re-run only the suites that didn't
-create an Opik experiment — i.e. suites that failed before ``close()``
+Used by ``agent-evals sweep --resume`` to re-run only the suites that didn't
+create an experiment — i.e. suites that failed before ``close()``
 (tunnel drops, rate limiting, crashes).  Suites whose evals ran but failed
-still have an experiment in Opik, so they are *not* resumed.
+still have an experiment, so they are *not* resumed.
+
+Checks local results first (local-cache-first); falls back to the Opik
+API when no local results match the tag.
 
 Usage::
 
     uv run python -m agent_evals.scripts.resume_missing \\
         --tag eu-20260907-120000 --env eu --evals-dir ./evals
-
-Prints one suite file path per line to stdout.  Nothing on stdout means
-every suite has an experiment in Opik (nothing to resume).
 """
 
 from __future__ import annotations
@@ -22,52 +22,47 @@ from pathlib import Path
 
 import yaml
 
-from .compare_experiments import _env_of, _has_tag, _list_experiments, _make_client
+from .data_source import make_source
 
 
 def _suite_name(suite_path: Path) -> str:
-    """Extract the experiment name from a suite YAML file.
-
-    Mirrors ``load_suite``: the ``name:`` field if present, else the file stem.
-    Only reads the top-level ``name`` — no connector / data-file resolution.
-    """
+    """Extract the experiment name from a suite YAML file."""
     with suite_path.open("r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
     return raw.get("name", suite_path.stem)
 
 
 def _discover_suites(evals_dir: Path, suite_filters: list[str]) -> list[Path]:
-    """Discover all suite YAML files, mirroring run_all_evals.sh discovery."""
-    all_suites = sorted(
-        p
-        for p in evals_dir.rglob("*.yaml")
-        if not p.name.startswith("_")
-        and not p.name.endswith("_local.yaml")
-        and p.stat().st_size > 0
-    )
-    if suite_filters:
-        all_suites = [
-            p for p in all_suites if any(pat in str(p) for pat in suite_filters)
-        ]
-    return all_suites
+    """Discover all suite YAML files."""
+    from .sweep import _discover_suites as _discover
+
+    return _discover(evals_dir, suite_filters)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Find suites missing from Opik for a given tag."
+        description="Find suites missing from a given tag."
     )
-    parser.add_argument("--tag", required=True, help="Opik tag to check.")
+    parser.add_argument("--tag", required=True, help="Tag to check.")
     parser.add_argument(
         "--evals-dir", required=True, help="Directory of suite YAML files."
     )
     parser.add_argument(
-        "--env", default=None, help="Environment filter (optional, for extra safety)."
+        "--env", default=None, help="Environment filter (optional)."
     )
     parser.add_argument(
         "--suite",
         action="append",
         default=[],
         help="Substring filter for suite paths (repeatable).",
+    )
+    parser.add_argument(
+        "--source", default="opik", choices=("opik", "local"),
+        help="Data source (default: opik with local-cache-first).",
+    )
+    parser.add_argument(
+        "--results-dir", default=None,
+        help="Path to results directory for local source.",
     )
     args = parser.parse_args()
 
@@ -85,13 +80,10 @@ def main() -> None:
     for p in all_suites:
         name_to_path[_suite_name(p)] = str(p)
 
-    client = _make_client()
-    exps = _list_experiments(client, limit=1000)
-    exps = [e for e in exps if _has_tag(e, args.tag)]
-    if args.env:
-        exps = [e for e in exps if _env_of(e) == args.env]
+    source = make_source(args.source, results_dir=args.results_dir)
+    found = source.list_experiments(tag=args.tag, env=args.env, limit=5000)
 
-    found_names = {e.name for e in exps}
+    found_names = set(found.keys())
     missing = [
         (name, path)
         for name, path in sorted(name_to_path.items())
@@ -103,7 +95,7 @@ def main() -> None:
             print(path)
     else:
         print(
-            f"All {len(all_suites)} suites have experiments in Opik "
+            f"All {len(all_suites)} suites have experiments "
             f"for tag {args.tag!r}.",
             file=sys.stderr,
         )
