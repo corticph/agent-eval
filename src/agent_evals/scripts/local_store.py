@@ -176,10 +176,12 @@ def list_experiments(
     for path in results_dir.rglob(pattern):
         if path.name.startswith("_"):
             continue
-        suite_name = _suite_name_from_path(path)
+        meta = _read_metadata(path)
+        # Prefer the suite name from metadata (matches Opik's experiment name);
+        # fall back to filename-derived name for older results without metadata.
+        suite_name = meta.get("suite_name") or _suite_name_from_path(path)
         if name and name not in suite_name:
             continue
-        meta = _read_metadata(path)
         exp = SimpleNamespace(
             id=str(path),
             name=suite_name,

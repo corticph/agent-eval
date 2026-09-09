@@ -38,9 +38,11 @@ class FileSink:
         self._trace_base_url = trace_base_url
         self._tags = tags or []
         self._env = env
+        self._suite_name: str | None = None
 
     def on_start(self, suite: "EvaluationSuite") -> None:
-        """Nothing to prepare: the constructor already claimed the output directory."""
+        """Capture the suite name so it can be written to the metadata."""
+        self._suite_name = suite.name
 
     def write(self, case: EvaluationCase, result: EvaluationResult) -> None:
         main_entry = result.as_dict()
@@ -79,12 +81,14 @@ class FileSink:
     def close(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         output = list(self._results)
-        if self._tags or self._env:
+        if self._tags or self._env or self._suite_name:
             meta: dict[str, Any] = {"_metadata": True}
             if self._tags:
                 meta["tags"] = self._tags
             if self._env:
                 meta["env"] = self._env
+            if self._suite_name:
+                meta["suite_name"] = self._suite_name
             output.insert(0, meta)
         with self.path.open("w", encoding="utf-8") as handle:
             json.dump(output, handle, ensure_ascii=False, indent=2)
