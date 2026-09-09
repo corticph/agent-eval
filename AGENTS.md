@@ -130,6 +130,31 @@ Each result JSON file starts with a `_metadata` entry carrying tags and
 environment.  Results without one (written before this feature) still work
 via substring matching on file paths.
 
+#### Local-cache-first (default Opik mode)
+
+Even with `--source opik` (the default), the comparison scripts check
+`results/*.json` **before** hitting the Opik API.  If a local result file
+with a matching tag exists, it's used directly — avoiding expensive Opik
+fetches for recent runs whose JSON is still on disk.  Falls back to Opik
+only when local data is missing.
+
+This means you don't need `--source local` for the common case of comparing
+recent sweeps: just run the sweep (which writes local JSON automatically),
+then compare by tag as usual.
+
+```bash
+# Run sweep (writes local JSON + uploads to Opik)
+uv run agent-evals sweep --env staging-eu --tag "staging-eu-$(date +%Y%m%d-%H%M%S)"
+
+# Compare — uses local cache first, falls back to Opik API
+uv run python -m agent_evals.scripts.compare_experiments \
+    --tag1 staging-eu-20260909-120000 --tag2 dev-weu-20260909-120000 \
+    --sort regression
+```
+
+Use `--results-dir <path>` to point the local cache at a non-default
+location (e.g. `../agent-eval-cases/results`).
+
 ### Resuming failed suites
 
 `--resume` uses Opik as the source of truth: it queries Opik for all
