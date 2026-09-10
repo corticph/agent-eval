@@ -8,8 +8,8 @@ to Opik, and can be compared across runs to find regressions.
 
 This file covers the core workflows. For deeper topics, see:
 
-- [`eval-report-style.md`](eval-report-style.md) — layout, theme, and UX
-  preferences for self-contained HTML eval reports (2-sided `generate_report`)
+- [`docs/eval-report-style.md`](docs/eval-report-style.md) — layout, theme, and
+  UX preferences for self-contained HTML eval reports (2-sided `generate_report`)
 - [`docs/multi-model-comparison.md`](docs/multi-model-comparison.md) — running
   multi-model eval sweeps, setting up temp evals dirs, filling coverage gaps,
   and generating N-way comparison reports (`compare_multi`)
@@ -421,7 +421,7 @@ diff trace1.txt trace2.txt
 2. Compare against a baseline: `uv run python -m agent_evals.scripts.compare_experiments --name <suite-prefix> --tag1 local-20260904-120000 --tag2 local-20260904-140612 --show-reason --sort regression`
 3. Inspect failures: `uv run python -m agent_evals.scripts.inspect_eval --exp <id> --case <case-name>`
 4. Fetch the trace to understand the agent's reasoning: `uv run python -m agent_evals.scripts.fetch_traces --exp <id> --case <case-name>`
-5. (Optional) Generate an HTML report following [`eval-report-style.md`](eval-report-style.md).
+5. (Optional) Generate an HTML report following [`docs/eval-report-style.md`](docs/eval-report-style.md).
 
 ### Deep-dive on regressions
 
@@ -450,7 +450,7 @@ each sub-agent's context stays focused on a single failure.
 ## 5. Generating eval reports
 
 When the user asks for a report of eval results, follow the style guide in
-[`eval-report-style.md`](eval-report-style.md). It captures layout, theme, and
+[`docs/eval-report-style.md`](docs/eval-report-style.md). It captures layout, theme, and
 UX preferences for self-contained HTML reports.
 
 The report generator (`agent_evals.scripts.generate_report`) is an **example
@@ -478,7 +478,7 @@ uv run python -m agent_evals.scripts.generate_report add-insights \
 data — run the comparison through a script to get exact counts, categorize
 all regressions programmatically, and grep the generated HTML to confirm
 every `href="#..."` link resolves to an existing `id`. See
-[`eval-report-style.md`](eval-report-style.md) for the full checklist and
+[`docs/eval-report-style.md`](docs/eval-report-style.md) for the full checklist and
 report structure.
 
 ## 6. Multi-model comparison
