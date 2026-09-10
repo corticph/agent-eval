@@ -54,6 +54,22 @@ def _compute_feedback_scores(step_results: list[dict[str, Any]]) -> list[dict[st
             if failed_details:
                 slot["reason"][step_name] = "; ".join(failed_details)
 
+    # Failed steps with no expectation results (timeouts, network errors) must
+    # not be invisible: inject a synthetic "_failed" column so overall reflects
+    # them.  Without this, a 2-step case where step 1 passes and step 2 times
+    # out would score 1.0 (averaging only the passing step).
+    failed_steps = [
+        sr for sr in step_results
+        if not sr.get("success", True) and not (sr.get("expectation_results") or [])
+    ]
+    if failed_steps:
+        slot = merged.setdefault("_failed", {"passed": 0, "total": 0, "reason": {}})
+        slot["total"] += len(failed_steps)
+        for sr in failed_steps:
+            step_name = sr.get("name") or "null"
+            he = sr.get("harness_error", {}) or {}
+            slot["reason"][step_name] = he.get("message", "step failed")
+
     columns: list[dict[str, Any]] = []
     for key, slot in merged.items():
         value = slot["passed"] / slot["total"] if slot["total"] else 1.0

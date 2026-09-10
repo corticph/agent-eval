@@ -4,6 +4,16 @@ This repo (`agent-eval`) is an evaluation harness for AI agent workflows. Evals
 run against named environments (local, staging-eu, eu, us, etc.), record results
 to Opik, and can be compared across runs to find regressions.
 
+### Guides
+
+This file covers the core workflows. For deeper topics, see:
+
+- [`eval-report-style.md`](eval-report-style.md) — layout, theme, and UX
+  preferences for self-contained HTML eval reports (2-sided `generate_report`)
+- [`docs/multi-model-comparison.md`](docs/multi-model-comparison.md) — running
+  multi-model eval sweeps, setting up temp evals dirs, filling coverage gaps,
+  and generating N-way comparison reports (`compare_multi`)
+
 ### Environment ordering
 
 Environments progress from newest to oldest, newest on the left:
@@ -84,7 +94,7 @@ Key flags:
 - `--no-opik`: skip Opik recording and tunnel (write local JSON only; tags are still stored in JSON metadata)
 - `--resume`: re-run only suites missing from the first `--tag` (checks local results first, then Opik); requires `--tag`
 - `--resume-file <path>`: resume from an explicit failed-suites file instead of querying Opik
-- Extra args after the flags are forwarded to `agent-evals run` (e.g. `-v`, `--runs 3`)
+- Extra args after `--` are forwarded to `agent-evals run` (e.g. `-- --runs 3`, `-- -v --stop-on-failure`)
 
 > **Parallel sweeps share the Opik tunnel.** The first sweep to finish will
 > leave the tunnel running if other sweep processes are still active, so
@@ -229,9 +239,12 @@ uv run agent-evals sweep --env dev-weu --evals-dir /path/to/evals \
 - **Use absolute paths** in `--resume-file`.  Relative paths are resolved
   from the current working directory, not the `--evals-dir`, and silently
   skip with a "no longer exists" warning.
-- **Don't use `--suite` to target specific suites** for re-runs — it's a
-  substring filter that matches all suites containing that substring (e.g.
-  `--suite foo` re-runs all suites containing "foo", not just the ones that 502'd).
+- **`--suite` is a substring filter**, not an exact match — `--suite foo`
+  matches all suites containing "foo". For re-running specific suites, use
+  `--resume-file` or run individual suite files directly.
+- **Use `--` before extra args** (e.g. `-- --runs 3`) — `argparse.REMAINDER`
+  captures everything after the first unknown token, so flags like
+  `--stop-on-failure` must come after `--`.
 - **Use a new tag** for the re-run so the report generator's "newest per
   suite" merge picks up the fresh results instead of the 502'd ones.
 - Alternatively, run individual suite files directly with
@@ -455,74 +468,57 @@ uv run python -m agent_evals.scripts.generate_report generate \
 # 2. Inspect the report, find element IDs you want to link to
 #    (e.g. #rca-timeout, #case-no-data-parts-my_case, #imp-my_case)
 
-# 3. Write author insights as HTML (insights.html) with <a href="#..."> links
-#    to specific sections/cases, then inject:
+# 3. Write author insights as HTML with <a href="#..."> links to specific
+#    sections/cases, then inject:
 uv run python -m agent_evals.scripts.generate_report add-insights \
-    -o report.html --insights insights.html
+    -o report.html --insights /tmp/insights.html
 ```
 
-### Report structure
+**Before injecting insights, verify every quantitative claim** against the
+data — run the comparison through a script to get exact counts, categorize
+all regressions programmatically, and grep the generated HTML to confirm
+every `href="#..."` link resolves to an existing `id`. See
+[`eval-report-style.md`](eval-report-style.md) for the full checklist and
+report structure.
 
-The report includes these sections (all linkable via `id`):
+## 6. Multi-model comparison
 
-- **Summary line** — mean scores, delta, regressed/improved/unchanged counts,
-  credit totals.
-- **Insights** (`#insights`) — author-written HTML with links to specific
-  cases and sections. Open by default. Injected via `add-insights`.
-- **Beta Changes Context** (`#beta-context`) — summary of what changed
-  between the two environments. Open by default.
-- **Root Cause Analysis** (`#root-cause-analysis`) — regressions grouped by
-  pattern. Each category is a collapsible (`#rca-{key}`) with a callout box
-  and nested case cards (`#case-{cat_key}-{case_name}`).
-- **Improvements** (`#improvements`) — all improved cases, collapsible.
-  Each case is linkable (`#imp-{case_name}`).
-- **Credit Usage by Suite** (`#credit-usage`) — per-suite credit table with
-  deltas and percentage change.
-- **Suite Breakdown** (`#suite-breakdown`) — every suite as a collapsible
-  card (`#suite-{name}`), with nested case cards
-  (`#suitecase-{suite_name}-{case_name}`).
+For comparing 3+ model runs side by side, use `compare_multi`:
 
-### Verifying insights before publishing
+```bash
+uv run python -m agent_evals.scripts.compare_multi \
+    --source local \
+    --tag "<env>-<model-a>-<timestamp>" --label "Model A" \
+    --tag "<env>-<model-b>-<timestamp>" --label "Model B" \
+    --tag "<env>-<model-c>-<timestamp>" --label "Model C" \
+    --baseline 0 \
+    --insights /tmp/insights.html \
+    -o results/multi-model-comparison.html
+```
 
-Before injecting insights into the report, **verify every quantitative claim**
-against the data:
+Key flags:
+- `--tag` — repeatable; multiple tags per run are merged (newest result per
+  suite wins). Each `--tag` group starts a new run; pair with `--label`.
+- `--label` — one per `--tag` group; must match count.
+- `--baseline N` — 0-based index of the baseline run (default: 0).
+- `--source` — `opik` (default, local-cache-first) or `local`.
+- `--insights` — path to an HTML file with author-written analysis.
 
-1. **Run the comparison data through a script** (or `full_comparison.py`) to
-   get exact counts: total cases, suites, regressed/improved/unchanged,
-   credits, mean scores. Do not round or approximate from memory.
-2. **Categorize all regressions** programmatically — don't leave a large
-   "Other" bucket. If >10% of regressions are "other", the categorization
-   function in the report generator needs new patterns.
-3. **Verify cost claims**: count infrastructure-failure cases and their
-   credits separately. Do not estimate "roughly X% of the reduction" —
-   compute it: `infra_credits / abs(credit_delta) * 100`.
-4. **Check that insight links resolve**: every `#rca-*`, `#case-*`,
-   `#imp-*`, `#suite-*` href in the insights HTML must match an `id` in
-   the generated report. After `add-insights`, grep for `href="#` and
-   verify each target exists.
-5. **Re-run insights after re-runs**: if you re-run failed suites with new
-   tags, regenerate the report and re-inject insights. Old insights will
-   have stale numbers (e.g. "17 cases hit 502" when they've been re-run).
+The report has tabbed suite breakdown (Suite Deltas / Credits / Case-by-Case)
+with sortable column headers, and anchor links that auto-expand parent
+details and switch tabs. Use `add-insights` to inject or update insights
+after generation:
 
-### Cost analysis
+```bash
+uv run python -m agent_evals.scripts.compare_multi add-insights \
+    -o results/multi-model-comparison.html --insights /tmp/insights.html
+```
 
-Each Opik experiment item carries a `usage.credits` field in its task
-output. The report extracts this per case and aggregates per suite. The
-credit usage table shows both sides' totals and the percentage change,
-making it easy to see whether the beta is more or less expensive than
-the baseline.
+For the full guide — running multi-model sweeps, setting up temp evals
+dirs, filling coverage gaps, and pitfalls — see
+[`docs/multi-model-comparison.md`](docs/multi-model-comparison.md).
 
-**When reporting credit reductions**, distinguish between:
-- **Efficiency gains**: cases that ran successfully on both sides but
-  consumed fewer credits on the beta (leaner history, fewer LLM calls).
-- **Infrastructure failures**: cases that failed on the beta (502,
-  timeout, connection error) and consumed ~0 credits. These inflate the
-  reduction but are not real savings.
-- Compute `infra_credits / abs(total_credit_delta) * 100` to quantify
-  the infrastructure contribution before claiming the reduction is from
-  efficiency.
-
-## 6. Linking the evals directory
+## 7. Linking the evals directory
 
 This repo is the eval harness only. The suite YAML files, expectations, and
 fixtures live in a separate cases repo. The scripts look for them in this
