@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 import openai
@@ -40,6 +41,10 @@ JUDGE_BASE_URL_VAR = "JUDGE_BASE_URL"
 JUDGE_MODEL_VAR = "JUDGE_MODEL"
 DEFAULT_JUDGE_BASE_URL = "https://ai.eu.corti.app/v1"
 DEFAULT_JUDGE_MODEL = "corti-s1-instant"
+
+_MAX_PROMPT_CHARS = 30000
+_JUDGE_RETRIES = 2
+_JUDGE_RETRY_DELAY = 3.0
 
 _JUDGE_PROMPT = """\
 You are an impartial evaluator assessing whether an AI agent's response is \
@@ -118,6 +123,12 @@ class Judge(Expectation):
         vars. Any failure — connection error, API error, unparseable or
         malformed reply — returns ``(False, <error detail>)`` so the check
         fails carrying the error. No degraded approximation is used.
+
+        The prompt is truncated to ``_MAX_PROMPT_CHARS`` before sending so
+        oversized faithfulness prompts (many retrieved sources with long
+        snippets) do not exceed the model's context window and produce empty
+        responses. Empty model responses are retried up to
+        ``_JUDGE_RETRIES`` times — the model may be transiently overloaded.
         """
         client = openai.OpenAI(
             base_url=os.environ.get(JUDGE_BASE_URL_VAR) or DEFAULT_JUDGE_BASE_URL,
@@ -126,29 +137,45 @@ class Judge(Expectation):
             api_key=_resolve_api_key() or "",
         )
         model = os.environ.get(JUDGE_MODEL_VAR) or DEFAULT_JUDGE_MODEL
-        try:
-            completion = client.chat.completions.create(
-                model=model,
-                # Corti Models' published schema takes max_tokens, not
-                # max_completion_tokens.
-                max_tokens=1000,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    }
-                ],
-                response_format={"type": "json_object"},
-            )
-        except Exception as exc:
-            return False, f"judge call failed: {exc}"
-        content = (completion.choices[0].message.content or "").strip()
+        truncated = prompt[:_MAX_PROMPT_CHARS]
+        if len(prompt) > _MAX_PROMPT_CHARS:
+            truncated = truncated + "\n...[truncated]"
+        content = ""
+        for attempt in range(1, _JUDGE_RETRIES + 2):
+            try:
+                completion = client.chat.completions.create(
+                    model=model,
+                    # Corti Models' published schema takes max_tokens, not
+                    # max_completion_tokens.
+                    max_tokens=1000,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": truncated,
+                        }
+                    ],
+                    response_format={"type": "json_object"},
+                )
+            except Exception as exc:
+                return False, f"judge call failed: {exc}"
+            content = (completion.choices[0].message.content or "").strip()
+            if content:
+                break
+            if attempt < _JUDGE_RETRIES + 1:
+                time.sleep(_JUDGE_RETRY_DELAY)
         try:
             data = json.loads(content)
             result = data["result"]
             if result not in ("PASS", "FAIL"):
                 raise ValueError(f"unexpected result value: {result!r}")
         except (json.JSONDecodeError, TypeError, KeyError, ValueError) as exc:
+            if not content:
+                return (
+                    False,
+                    f"judge returned empty content after {_JUDGE_RETRIES + 1} "
+                    f"attempt(s) (prompt was {len(prompt)} chars, "
+                    f"model={model})",
+                )
             return False, f"judge verdict malformed ({exc}): {content!r}"
         return result == "PASS", data.get("explanation", "")
 

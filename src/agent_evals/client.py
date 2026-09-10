@@ -19,7 +19,7 @@ from .errors import (
 _LOGGER = logging.getLogger(__name__)
 
 # (connect timeout, read timeout) in seconds
-_DEFAULT_TIMEOUT: tuple[float, float] = (5, 120)
+_DEFAULT_TIMEOUT: tuple[float, float] = (5, 180)
 
 # Longest a single HTTP request may block with the default timeouts. Eval
 # wall-clock timeouts (``timeout_seconds``) must exceed this: the timeout
@@ -151,11 +151,23 @@ class AgentClient:
         self,
         context_id: str,
         *,
+        page_size: int | None = None,
+        page_token: str | None = None,
         timeout: float | tuple[float, float] | None = _DEFAULT_TIMEOUT,
     ) -> dict[str, Any]:
-        """Fetch the OpenInference trace for a context (GET /v2/agentic/contexts/{id}/trace)."""
+        """Fetch the OpenInference trace for a context (GET /v2/agentic/contexts/{id}/trace).
+
+        ``page_size`` (max 200) and ``page_token`` drive the endpoint's
+        pagination; the response carries ``nextPageToken`` (``null`` when
+        exhausted) alongside the ``traces`` array.
+        """
         path = f"/v2/agentic/contexts/{context_id}/trace"
-        return self._request("GET", path, timeout=timeout)
+        params: dict[str, str | int | bool] = {}
+        if page_size is not None:
+            params["pageSize"] = page_size
+        if page_token is not None:
+            params["pageToken"] = page_token
+        return self._request("GET", path, params=params or None, timeout=timeout)
 
     def close(self) -> None:
         """Release underlying HTTP resources."""

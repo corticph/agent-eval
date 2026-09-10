@@ -306,10 +306,15 @@ class TestTraceSurface:
         must see the un-overridden environment unless a test sets it."""
         monkeypatch.delenv("OPIK_URL_OVERRIDE", raising=False)
 
-    def test_local_derives_no_trace_links(self) -> None:
+    def test_local_derives_trace_links(self) -> None:
+        # Local now has its own Opik project (via the dev-weu tunnel), so it
+        # gets trace links like every other environment.
         environment = Environment("local")
-        assert environment.trace_base_url is None
-        assert environment.trace_project_id is None
+        project_id = OPIK_PROJECT_IDS["local"]
+        assert environment.trace_base_url == (
+            f"{OPIK_HOSTS['local']}/default/projects/{project_id}/logs?thread="
+        )
+        assert environment.trace_project_id == project_id
 
     def test_remote_trace_base_is_the_environments_opik_thread_link(self) -> None:
         # The agent's contextId is the Opik thread id; a trace link is the
@@ -357,10 +362,13 @@ class TestTraceSurface:
             f"http://localhost:5173/default/projects/{project_id}/logs?thread="
         )
 
-    def test_override_does_not_conjure_links_for_local(
+    def test_override_redirects_local_trace_links(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Local has no trace project anywhere; redirecting the host cannot
-        # invent one, so the Trace line stays omitted.
+        # Local now has a trace project, so OPIK_URL_OVERRIDE redirects the
+        # host but keeps the project id, yielding a link.
         monkeypatch.setenv("OPIK_URL_OVERRIDE", "http://localhost:5173")
-        assert Environment("local").trace_base_url is None
+        project_id = OPIK_PROJECT_IDS["local"]
+        assert Environment("local").trace_base_url == (
+            f"http://localhost:5173/default/projects/{project_id}/logs?thread="
+        )
