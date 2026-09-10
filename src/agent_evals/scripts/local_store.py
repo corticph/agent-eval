@@ -63,14 +63,25 @@ def _compute_feedback_scores(step_results: list[dict[str, Any]]) -> list[dict[st
     if columns:
         overall = sum(c["value"] for c in columns) / len(columns)
     else:
-        overall = 1.0
+        any_failed = any(not sr.get("success", True) for sr in step_results)
+        overall = 0.0 if any_failed else 1.0
     overall_reason = "; ".join(
         f"{sr.get('name') or 'null'}: {c['detail']}"
         for sr in step_results
         for er in sr.get("expectation_results") or []
         for c in er.get("checks") or []
         if not c.get("passed")
-    ) or "passed"
+    )
+    if not overall_reason:
+        any_failed = any(not sr.get("success", True) for sr in step_results)
+        if any_failed:
+            failed_steps = [
+                f"{sr.get('name') or 'null'}: {sr.get('harness_error', {}).get('message', 'step failed')}"
+                for sr in step_results if not sr.get("success", True)
+            ]
+            overall_reason = "; ".join(failed_steps) or "step failed"
+        else:
+            overall_reason = "passed"
 
     return [{"name": "overall", "value": overall, "reason": overall_reason}, *columns]
 
