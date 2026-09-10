@@ -10,9 +10,6 @@ This file covers the core workflows. For deeper topics, see:
 
 - [`docs/eval-report-style.md`](docs/eval-report-style.md) — layout, theme, and
   UX preferences for self-contained HTML eval reports (2-sided `generate_report`)
-- [`docs/multi-model-comparison.md`](docs/multi-model-comparison.md) — running
-  multi-model eval sweeps, setting up temp evals dirs, filling coverage gaps,
-  and generating N-way comparison reports (`compare_multi`)
 
 ### Environment ordering
 
@@ -483,14 +480,26 @@ report structure.
 
 ## 6. Multi-model comparison
 
-For comparing 3+ model runs side by side, use `compare_multi`:
+For comparing 3+ model runs side by side, use `compare_multi`. Run one sweep
+per model with `--model` and a unique tag, then generate the report:
 
 ```bash
+# Run one sweep per model (parallel, each with its own tag):
+TS=$(date +%Y%m%d-%H%M%S)
+uv run agent-evals sweep --env dev-weu --no-opik --jobs 5 \
+    --tag "dev-default-${TS}" > /tmp/sweep-default.log 2>&1 &
+uv run agent-evals sweep --env dev-weu --no-opik --jobs 5 \
+    --model corti-s1-instant --tag "dev-corti-s1-instant-${TS}" > /tmp/sweep-instant.log 2>&1 &
+uv run agent-evals sweep --env dev-weu --no-opik --jobs 5 \
+    --model corti-s1 --tag "dev-corti-s1-${TS}" > /tmp/sweep-s1.log 2>&1 &
+wait
+
+# Generate the multi-way comparison report:
 uv run python -m agent_evals.scripts.compare_multi \
     --source local \
-    --tag "<env>-<model-a>-<timestamp>" --label "Model A" \
-    --tag "<env>-<model-b>-<timestamp>" --label "Model B" \
-    --tag "<env>-<model-c>-<timestamp>" --label "Model C" \
+    --tag "dev-default-${TS}" --label "Default (dev)" \
+    --tag "dev-corti-s1-instant-${TS}" --label "corti-s1-instant" \
+    --tag "dev-corti-s1-${TS}" --label "corti-s1" \
     --baseline 0 \
     --insights /tmp/insights.html \
     -o results/multi-model-comparison.html
@@ -514,9 +523,20 @@ uv run python -m agent_evals.scripts.compare_multi add-insights \
     -o results/multi-model-comparison.html --insights /tmp/insights.html
 ```
 
-For the full guide — running multi-model sweeps, setting up temp evals
-dirs, filling coverage gaps, and pitfalls — see
-[`docs/multi-model-comparison.md`](docs/multi-model-comparison.md).
+### Filling coverage gaps
+
+Parallel sweeps on dev-weu can hit rate limiting or SSL errors on later
+suites. Re-run just the missing suites with `agent-evals run` and the same
+tag:
+
+```bash
+uv run agent-evals run <evals-dir>/pubmed/reference.yaml --env dev-weu \
+    --model corti-s1 --tag "dev-corti-s1-${TS}"
+```
+
+Verify all runs have the same suites before generating the report —
+`compare_multi` shows "Only in" warnings, but the report is cleaner when
+all sides match.
 
 ## 7. Linking the evals directory
 
