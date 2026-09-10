@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eval Report</title>
+<style>
+:root {
+  --bg: #fff; --card: #fff; --text: #1a1a1a; --faint: #888; --border: #e0e0e0;
+  --red: #c62828; --green: #2e7d32; --neutral: #666; --amber: #f57f17;
+  --trend-r: #ef5350; --trend-i: #66bb6a; --trend-u: #e0e0e0;
+  --badge-r: #ffcdd2; --badge-g: #c8e6c9; --badge-n: #f5f5f5; --badge-a: #fff8e1;
+  --code-bg: #f8f8f8; --link: #1976d2;
+  --callout-r: #ffebee; --callout-a: #fff8e1; --callout-g: #e8f5e9;
+}
+[data-theme="dark"] {
+  --bg: #1a1a2e; --card: #16213e; --text: #e0e0e0; --faint: #888; --border: #333;
+  --red: #ef5350; --green: #66bb6a; --neutral: #aaa; --amber: #ffb74d;
+  --trend-r: #ef5350; --trend-i: #66bb6a; --trend-u: #333;
+  --badge-r: #4a1a1a; --badge-g: #1a3a1a; --badge-n: #2a2a2a; --badge-a: #3a3520;
+  --code-bg: #0d1117; --link: #64b5f6;
+  --callout-r: #3a1a1a; --callout-a: #3a3520; --callout-g: #1a3a1a;
+}
+body { font-family: -apple-system, system-ui, sans-serif; max-width: 920px;
+       margin: 3rem auto; padding: 0 1rem; line-height: 1.5;
+       background: var(--bg); color: var(--text); }
+h1 { font-size: 1.4rem; }
+h2 { font-size: 1.1rem; margin-top: 2rem; }
+h3 { font-size: 0.95rem; margin: 0.5rem 0; }
+.meta { color: var(--faint); font-size: 0.85rem; }
+.label { color: var(--faint); font-size: 0.8rem; }
+.num { font-weight: 600; font-size: 0.95rem; }
+.num.red { color: var(--red); } .num.green { color: var(--green); } .num.neutral { color: var(--neutral); }
+.summary-line { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: baseline; margin-top: 0.5rem; }
+.trend-bar { display: flex; height: 8px; margin: 0.5rem 0; border-radius: 4px; overflow: hidden; }
+.trend-regressed { background: var(--trend-r); }
+.trend-improved { background: var(--trend-i); }
+.trend-unchanged { background: var(--trend-u); }
+.controls { margin: 0.5rem 0; }
+.btn { cursor: pointer; background: var(--card); border: 1px solid var(--border);
+       padding: 0.3rem 0.8rem; border-radius: 4px; font-size: 0.85rem; color: var(--text); }
+details { margin: 0.3rem 0; padding: 0.3rem 0.5rem; border-radius: 4px;
+          border: 1px solid var(--border); background: var(--card); }
+details[open] { border-color: #aaa; }
+summary { cursor: pointer; font-weight: 500; list-style: none; }
+summary::-webkit-details-marker { display: none; }
+summary::before { content: "\25b8 "; color: var(--faint); }
+details[open] > summary::before { content: "\25be "; }
+.badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px;
+          font-size: 0.75rem; font-weight: 600; font-family: monospace; }
+.badge.red { background: var(--badge-r); color: var(--red); }
+.badge.green { background: var(--badge-g); color: var(--green); }
+.badge.neutral { background: var(--badge-n); color: var(--neutral); }
+.badge.amber { background: var(--badge-a); color: var(--amber); }
+.suite-regressed { border-left: 3px solid var(--red); }
+.suite-improved { border-left: 3px solid var(--green); }
+.suite-unchanged { border-left: 3px solid var(--neutral); }
+.case-card { margin-left: 1rem; border: 1px solid var(--border); }
+.case-detail { padding: 0.5rem 0; }
+.scores-table, .cost-table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.3rem 0; }
+.scores-table th, .cost-table th { text-align: left; padding: 0.2rem 0.4rem; border-bottom: 1px solid var(--border); color: var(--faint); font-weight: 500; }
+.scores-table td, .cost-table td { padding: 0.2rem 0.4rem; }
+.num-cell { text-align: right; font-family: monospace; }
+.totals { font-weight: 600; border-top: 2px solid var(--border); }
+.reasons { margin: 0.3rem 0; }
+.reasons code { display: block; font-size: 0.8rem; background: var(--code-bg); padding: 0.3rem;
+                border-radius: 3px; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+.trace-links { margin: 0.3rem 0; }
+.trace-link { display: inline-block; margin-right: 0.5rem; padding: 0.2rem 0.5rem;
+              background: var(--code-bg); border: 1px solid var(--border); border-radius: 3px;
+              text-decoration: none; font-size: 0.8rem; color: var(--link); }
+.cmds { margin: 0.3rem 0; }
+.cmds code { display: block; font-size: 0.75rem; background: var(--code-bg); padding: 0.2rem;
+             border-radius: 3px; word-break: break-all; color: var(--text); }
+.callout { padding: 0.5rem 0.8rem; border-radius: 4px; margin: 0.3rem 0; font-size: 0.85rem; }
+.callout.red { background: var(--callout-r); border-left: 3px solid var(--red); }
+.callout.amber { background: var(--callout-a); border-left: 3px solid var(--amber); }
+.callout.green { background: var(--callout-g); border-left: 3px solid var(--green); }
+.root-cause { margin: 0.5rem 0; }
+.footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.footer code { font-size: 0.75rem; color: var(--faint); }
+.theme-toggle { position: fixed; top: 1rem; right: 1rem; cursor: pointer;
+                 background: var(--card); border: 1px solid var(--border);
+                 padding: 0.3rem 0.6rem; border-radius: 4px; font-size: 1rem; z-index: 100; }
+.beta-context { font-size: 0.85rem; }
+.beta-context ul { margin: 0.3rem 0; padding-left: 1.2rem; }
+.beta-context li { margin: 0.1rem 0; }
+.insights { padding: 0.8rem 0; font-size: 0.92rem; }
+.insights p { margin: 0.6rem 0; line-height: 1.65; }
+.insights ul { margin: 0.4rem 0 0.6rem 1.2rem; padding-left: 0; }
+.insights li { margin: 0.3rem 0; line-height: 1.55; }
+.insights h3 { font-size: 0.95rem; margin: 1.2rem 0 0.4rem; padding-top: 0.6rem; border-top: 1px solid var(--border); }
+.insights h3:first-child { border-top: none; padding-top: 0; }
+.insights strong { font-weight: 600; }
+.insights code { background: var(--code-bg); padding: 0.1rem 0.25rem; border-radius: 3px; font-size: 0.82rem; }
+.insights .red { color: var(--red); } .insights .amber { color: var(--amber); } .insights .green { color: var(--green); }
+details:target { scroll-margin-top: 1rem; }
+details:target > summary { font-weight: 700; }
+a[href^="#"] { color: var(--link); text-decoration: none; }
+a[href^="#"]:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<button class="theme-toggle" onclick="toggleTheme()"></button>
+<script>
+function toggleTheme() {
+  var cur = document.documentElement.getAttribute("data-theme");
+  var next = cur === "dark" ? "" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  localStorage.setItem("theme", next);
+}
+(function() {
+  var saved = localStorage.getItem("theme");
+  if (saved) document.documentElement.setAttribute("data-theme", saved);
+})();
+function toggleAll(open) {
+  document.querySelectorAll("details").forEach(function(d) { d.open = open; });
+}
+</script>
+
+<h1>Eval Report: local (beta + fix) vs staging-eu (main)</h1>
+<p class="meta">Score: <code>overall</code> · Compared 2 cases across 1 suites · Tags: <code>staging-local-20260909-230318</code> → <code>local-20260910-121831</code></p>
+<div class="summary-line">
+<span class="num red">0.812</span> <span class="label">staging-eu (main)</span>
+ · <span class="num red">0.000</span> <span class="label">local (beta + fix)</span>
+ · <span class="num red">-81.2pp</span> <span class="label">delta</span>
+ · <span class="num red">2</span> <span class="label">regressed</span>
+ · <span class="num green">0</span> <span class="label">improved</span>
+ · <span class="num neutral">0</span> <span class="label">unchanged</span>
+</div>
+<div class="summary-line" style="margin-top:0.5rem">
+<span class="label">Credits:</span> <span class="num">0.3886</span> <span class="label">staging-eu (main)</span>
+ · <span class="num">0.0000</span> <span class="label">local (beta + fix)</span>
+ · <span class="num green">-0.3886 (-100.0%)</span>
+</div>
+<div class="trend-bar"><div class="trend-regressed" style="width:100.0%"></div><div class="trend-improved" style="width:0.0%"></div><div class="trend-unchanged" style="width:0.0%"></div></div>
+<div class="controls">
+<button class="btn" onclick="toggleAll(true)">Expand all</button> 
+<button class="btn" onclick="toggleAll(false)">Collapse all</button>
+</div>
+<p class="meta"><strong>Only in staging-eu (main):</strong> amboss_clinical, interviewing_agentic, interviewing_answer_changes, interviewing_claim_intake, interviewing_dialog_and_next_question, interviewing_post_completion_changes, interviewing_sequential_post_completion_artifacts, interviewing_single, medical_calculator_context_history, medical_calculator_input_required_manual, medical_calculator_input_required_reference, medical_calculator_manual, medical_coding_coding, memory_json_embedding, memory_recall, pubmed_direct_attach, pubmed_direct_attach_query_construction, pubmed_direct_attach_task_complexity, pubmed_reference, pubmed_retrieval</p>
+<h2 id="root-cause-analysis">Root Cause Analysis</h2>
+<p class="meta">2 regressed cases grouped by pattern:</p>
+<details class="root-cause" id="rca-premature-completion">
+<summary><span class="badge red">2</span> Agent bug: Premature task completion</summary>
+<div class="callout red">The agent completed the task instead of staying in input-required state. This may indicate a change in the orchestrator's completion signalling.</div>
+<details class="case-card" id="case-premature-completion-questionnaire_on_site_path">
+<summary><span class="badge red">-0.750</span> questionnaire_on_site_path <span class="meta">(interviewing_multi_agent)</span></summary>
+<div class="case-detail">
+<table class="scores-table"><thead><tr><th>Score</th><th>staging-eu (main)</th><th>local (beta + fix)</th><th>Delta</th></tr></thead><tbody>
+<tr><td>expected_state</td><td class="num-cell">0.750</td><td class="num-cell">0.000</td><td class="num-cell red">-0.750</td></tr>
+<tr><td>overall</td><td class="num-cell">0.750</td><td class="num-cell">0.000</td><td class="num-cell red">-0.750</td></tr>
+</tbody></table>
+<p class="meta">Credits: 0.1094 → 0.0000</p>
+<div class="reasons">
+<p><strong>staging-eu (main):</strong> <code>answer_commute: expected status &#x27;input-required&#x27; but received &#x27;TASK_STATE_COMPLETED&#x27;</code></p>
+<p><strong>local (beta + fix):</strong> <code>initial_questionnaire: expected status &#x27;input-required&#x27; but received &#x27;TASK_STATE_COMPLETED&#x27;</code></p>
+</div>
+<div class="trace-links">
+<a href="https://opik.staging-eu.corti.app/default/projects/019c03dd-9c39-73d0-8073-b01151b9204f/logs?thread=01a0880e-5ac9-70f9-9a14-619649f13e39" target="_blank" class="trace-link">Trace (staging-eu (main)) ↗</a>
+<a href="https://opik.dev-weu.corti.app/default/projects/019ff07f-077b-7596-90bd-4f356dee02e6/logs?thread=01a08ad3-c3ab-7924-b5d8-6ed49a27c148" target="_blank" class="trace-link">Trace (local (beta + fix)) ↗</a>
+</div>
+<div class="cmds">
+<code>uv run python -m agent_evals.scripts.inspect_eval --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260909_232352_staging-eu.json --case "questionnaire_on_site_path"</code><br>
+<code>uv run python -m agent_evals.scripts.inspect_eval --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260910_121847_local.json --case "questionnaire_on_site_path"</code><br>
+<code>uv run python -m agent_evals.scripts.fetch_traces --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260909_232352_staging-eu.json --case "questionnaire_on_site_path"</code><br>
+<code>uv run python -m agent_evals.scripts.fetch_traces --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260910_121847_local.json --case "questionnaire_on_site_path"</code>
+</div>
+</div>
+</details>
+<details class="case-card" id="case-premature-completion-questionnaire_remote_path">
+<summary><span class="badge red">-0.875</span> questionnaire_remote_path <span class="meta">(interviewing_multi_agent)</span></summary>
+<div class="case-detail">
+<table class="scores-table"><thead><tr><th>Score</th><th>staging-eu (main)</th><th>local (beta + fix)</th><th>Delta</th></tr></thead><tbody>
+<tr><td>expected_state</td><td class="num-cell">0.875</td><td class="num-cell">0.000</td><td class="num-cell red">-0.875</td></tr>
+<tr><td>overall</td><td class="num-cell">0.875</td><td class="num-cell">0.000</td><td class="num-cell red">-0.875</td></tr>
+</tbody></table>
+<p class="meta">Credits: 0.2791 → 0.0000</p>
+<div class="reasons">
+<p><strong>staging-eu (main):</strong> <code>answer_weekly_sync: expected status &#x27;input-required&#x27; but received &#x27;TASK_STATE_COMPLETED&#x27;</code></p>
+<p><strong>local (beta + fix):</strong> <code>initial_questionnaire: expected status &#x27;input-required&#x27; but received &#x27;TASK_STATE_COMPLETED&#x27;</code></p>
+</div>
+<div class="trace-links">
+<a href="https://opik.staging-eu.corti.app/default/projects/019c03dd-9c39-73d0-8073-b01151b9204f/logs?thread=01a0880e-5ab2-70f1-9063-2f4d0891aebe" target="_blank" class="trace-link">Trace (staging-eu (main)) ↗</a>
+<a href="https://opik.dev-weu.corti.app/default/projects/019ff07f-077b-7596-90bd-4f356dee02e6/logs?thread=01a08ad3-c3aa-7858-b0d2-455964d00e32" target="_blank" class="trace-link">Trace (local (beta + fix)) ↗</a>
+</div>
+<div class="cmds">
+<code>uv run python -m agent_evals.scripts.inspect_eval --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260909_232352_staging-eu.json --case "questionnaire_remote_path"</code><br>
+<code>uv run python -m agent_evals.scripts.inspect_eval --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260910_121847_local.json --case "questionnaire_remote_path"</code><br>
+<code>uv run python -m agent_evals.scripts.fetch_traces --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260909_232352_staging-eu.json --case "questionnaire_remote_path"</code><br>
+<code>uv run python -m agent_evals.scripts.fetch_traces --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260910_121847_local.json --case "questionnaire_remote_path"</code>
+</div>
+</div>
+</details>
+</details>
+<h2 id="credit-usage">Credit Usage by Suite</h2>
+<table class="cost-table"><thead><tr><th>Suite</th><th>staging-eu (main) credits</th><th>local (beta + fix) credits</th><th>Delta</th><th>% change</th></tr></thead><tbody>
+<tr><td>interviewing_multi_agent</td><td class="num-cell">0.3886</td><td class="num-cell">0.0000</td><td class="num-cell red">-0.3886</td><td class="num-cell red">-100.0%</td></tr>
+<tr class="totals"><td>Total</td><td class="num-cell">0.3886</td><td class="num-cell">0.0000</td><td class="num-cell red">-0.3886</td><td class="num-cell red">-100.0%</td></tr>
+</tbody></table>
+<h2 id="suite-breakdown">Suite Breakdown</h2>
+<details class="suite-card suite-regressed" id="suite-interviewing_multi_agent">
+<summary><span class="badge red">-0.812</span> interviewing_multi_agent <span class="meta">0.812 → 0.000 · 2 regressed, 0 improved, 0 unchanged · credits: 0.3886 → 0.0000</span></summary>
+<details class="case-card" id="suitecase-interviewing_multi_agent-questionnaire_remote_path">
+<summary><span class="badge red">-0.875</span> questionnaire_remote_path <span class="meta">0.875 → 0.000</span></summary>
+<div class="case-detail">
+<table class="scores-table"><thead><tr><th>Score</th><th>staging-eu (main)</th><th>local (beta + fix)</th><th>Delta</th></tr></thead><tbody>
+<tr><td>expected_state</td><td class="num-cell">0.875</td><td class="num-cell">0.000</td><td class="num-cell red">-0.875</td></tr>
+<tr><td>overall</td><td class="num-cell">0.875</td><td class="num-cell">0.000</td><td class="num-cell red">-0.875</td></tr>
+</tbody></table>
+<p class="meta">Credits: 0.2791 → 0.0000</p>
+<div class="reasons">
+<p><strong>staging-eu (main):</strong> <code>answer_weekly_sync: expected status &#x27;input-required&#x27; but received &#x27;TASK_STATE_COMPLETED&#x27;</code></p>
+<p><strong>local (beta + fix):</strong> <code>initial_questionnaire: expected status &#x27;input-required&#x27; but received &#x27;TASK_STATE_COMPLETED&#x27;</code></p>
+</div>
+<div class="trace-links">
+<a href="https://opik.staging-eu.corti.app/default/projects/019c03dd-9c39-73d0-8073-b01151b9204f/logs?thread=01a0880e-5ab2-70f1-9063-2f4d0891aebe" target="_blank" class="trace-link">Trace (staging-eu (main)) ↗</a>
+<a href="https://opik.dev-weu.corti.app/default/projects/019ff07f-077b-7596-90bd-4f356dee02e6/logs?thread=01a08ad3-c3aa-7858-b0d2-455964d00e32" target="_blank" class="trace-link">Trace (local (beta + fix)) ↗</a>
+</div>
+<div class="cmds">
+<code>uv run python -m agent_evals.scripts.inspect_eval --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260909_232352_staging-eu.json --case "questionnaire_remote_path"</code><br>
+<code>uv run python -m agent_evals.scripts.inspect_eval --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260910_121847_local.json --case "questionnaire_remote_path"</code><br>
+<code>uv run python -m agent_evals.scripts.fetch_traces --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260909_232352_staging-eu.json --case "questionnaire_remote_path"</code><br>
+<code>uv run python -m agent_evals.scripts.fetch_traces --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260910_121847_local.json --case "questionnaire_remote_path"</code>
+</div>
+</div></details>
+<details class="case-card" id="suitecase-interviewing_multi_agent-questionnaire_on_site_path">
+<summary><span class="badge red">-0.750</span> questionnaire_on_site_path <span class="meta">0.750 → 0.000</span></summary>
+<div class="case-detail">
+<table class="scores-table"><thead><tr><th>Score</th><th>staging-eu (main)</th><th>local (beta + fix)</th><th>Delta</th></tr></thead><tbody>
+<tr><td>expected_state</td><td class="num-cell">0.750</td><td class="num-cell">0.000</td><td class="num-cell red">-0.750</td></tr>
+<tr><td>overall</td><td class="num-cell">0.750</td><td class="num-cell">0.000</td><td class="num-cell red">-0.750</td></tr>
+</tbody></table>
+<p class="meta">Credits: 0.1094 → 0.0000</p>
+<div class="reasons">
+<p><strong>staging-eu (main):</strong> <code>answer_commute: expected status &#x27;input-required&#x27; but received &#x27;TASK_STATE_COMPLETED&#x27;</code></p>
+<p><strong>local (beta + fix):</strong> <code>initial_questionnaire: expected status &#x27;input-required&#x27; but received &#x27;TASK_STATE_COMPLETED&#x27;</code></p>
+</div>
+<div class="trace-links">
+<a href="https://opik.staging-eu.corti.app/default/projects/019c03dd-9c39-73d0-8073-b01151b9204f/logs?thread=01a0880e-5ac9-70f9-9a14-619649f13e39" target="_blank" class="trace-link">Trace (staging-eu (main)) ↗</a>
+<a href="https://opik.dev-weu.corti.app/default/projects/019ff07f-077b-7596-90bd-4f356dee02e6/logs?thread=01a08ad3-c3ab-7924-b5d8-6ed49a27c148" target="_blank" class="trace-link">Trace (local (beta + fix)) ↗</a>
+</div>
+<div class="cmds">
+<code>uv run python -m agent_evals.scripts.inspect_eval --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260909_232352_staging-eu.json --case "questionnaire_on_site_path"</code><br>
+<code>uv run python -m agent_evals.scripts.inspect_eval --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260910_121847_local.json --case "questionnaire_on_site_path"</code><br>
+<code>uv run python -m agent_evals.scripts.fetch_traces --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260909_232352_staging-eu.json --case "questionnaire_on_site_path"</code><br>
+<code>uv run python -m agent_evals.scripts.fetch_traces --exp /Users/ssk/repositories/agent-eval/results/interviewing/multi_agent_20260910_121847_local.json --case "questionnaire_on_site_path"</code>
+</div>
+</div></details>
+</details>
+<div class="footer"><code>Generated by agent-eval · compare_experiments --tag1 staging-local-20260909-230318 --tag2 local-20260910-121831 --score overall</code></div>
+</body>
+</html>
