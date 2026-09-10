@@ -9,8 +9,6 @@ them loudly rather than silently ignoring stale invocations.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
-from typing import Any, List, Optional
 
 import pytest
 
