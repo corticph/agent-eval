@@ -1,14 +1,20 @@
-"""Inspect a single experiment item from Opik: input, output, and expectations.
+"""Inspect a single experiment item: input, output, and expectations.
 
 Designed as a follow-up to ``compare_experiments``: once you've found a case
 with a score delta, use this to see the full input (what was sent to the
 agent), the output (what the agent responded), and the per-expectation
 verdicts (why each check passed or failed).
 
+Works with both Opik (default) and local JSON results (``--source local``).
+
 Usage:
     # By experiment id + case name (from the compare report):
     uv run python -m agent_evals.scripts.inspect_eval \\
         --exp <experiment-id> --case mixed_narrative_1
+
+    # With local source, --exp is a file path:
+    uv run python -m agent_evals.scripts.inspect_eval \\
+        --source local --exp results/smoke/hello.json --case my_case
 
     # List all case names in an experiment:
     uv run python -m agent_evals.scripts.inspect_eval \\
@@ -27,48 +33,22 @@ import textwrap
 from pathlib import Path
 
 import dotenv
-import opik
 
-from ..environment import OPIK_URL_OVERRIDE_VAR
-from ..reporting.opik_target import resolve_opik_url
+from .data_source import DataSource, make_source
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 dotenv.load_dotenv(_REPO_ROOT / ".env")
-
-DEFAULT_PROJECT = "Agents"
-
-
-def _make_client() -> opik.Opik:
-    """Create an Opik client using the same URL resolution as the eval harness."""
-    url = resolve_opik_url()
-    import os
-    os.environ.setdefault(OPIK_URL_OVERRIDE_VAR, url)
-    project = os.environ.get("OPIK_PROJECT_NAME") or DEFAULT_PROJECT
-    os.environ["OPIK_PROJECT_NAME"] = project
-    return opik.Opik(
-        host=url,
-        workspace="default",
-        api_key=os.environ.get("OPIK_API_KEY"),
-    )
 
 
 # --- fetching -----------------------------------------------------------------
 
 
-def _get_items(client: opik.Opik, experiment_id: str) -> list:
-    """Fetch all experiment items by experiment id."""
-    return client.get_experiment_by_id(experiment_id).get_items()
-
-
-def _case_name(item) -> str:
-    data = item.dataset_item_data or {}
-    return data.get("name") or "(unnamed)"
-
-
 def _find_item(items: list, case_name: str):
     """Find an item by case name (exact match)."""
     for item in items:
-        if _case_name(item) == case_name:
+        data = item.dataset_item_data or {}
+        name = data.get("name") or "(unnamed)"
+        if name == case_name:
             return item
     return None
 
@@ -208,9 +188,11 @@ def _print_scores(item) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Inspect a single Opik experiment item: input, output, and expectations."
+        description="Inspect a single experiment item: input, output, and expectations."
     )
-    parser.add_argument("--exp", required=True, help="Experiment ID from Opik.")
+    parser.add_argument("--exp", required=True, help="Experiment ID (Opik) or file path (local).")
+    parser.add_argument("--source", default="opik", choices=("opik", "local"), help="Data source (default: opik).")
+    parser.add_argument("--results-dir", action="append", default=[], help="Path to results directory for local source (repeatable, default: results/).")
     grp = parser.add_mutually_exclusive_group()
     grp.add_argument("--case", default=None, help="Case name to inspect.")
     grp.add_argument("--list", action="store_true", help="List all case names and exit.")
@@ -226,8 +208,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    client = _make_client()
-    items = _get_items(client, args.exp)
+    source = make_source(args.source, results_dir=args.results_dir or None)
+    exp = type("Exp", (), {"id": args.exp})()
+    items = source.get_items(exp)
 
     if not items:
         print("No items found in this experiment.")
@@ -237,13 +220,10 @@ def main() -> None:
         print(f"{'case name':<50} {'overall':>8}")
         print("-" * 60)
         for item in items:
-            name = _case_name(item)
-            overall = None
-            for fs in item.feedback_scores or []:
-                if fs.get("name") == "overall":
-                    overall = fs.get("value")
-                    break
-            v_str = f"{overall:.3f}" if overall is not None else "-"
+            name = source.case_name(item)
+            sm = source.score_map(item)
+            overall = sm.get("overall")
+            v_str = f"{overall[0]:.3f}" if overall else "-"
             print(f"{name[:50]:<50} {v_str:>8}")
         return
 
@@ -254,7 +234,7 @@ def main() -> None:
     if item is None:
         print(f"Case {args.case!r} not found. Available:")
         for it in items:
-            print(f"  {_case_name(it)}")
+            print(f"  {source.case_name(it)}")
         return
 
     if not args.expectations_only:

@@ -31,14 +31,23 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _discover_suites(evals_dir: Path, suite_filters: list[str]) -> list[Path]:
-    """Find all suite YAML files under *evals_dir*, applying substring filters."""
-    all_suites = sorted(
-        p
-        for p in evals_dir.rglob("*.yaml")
-        if not p.name.startswith("_")
-        and not p.name.endswith("_local.yaml")
-        and p.stat().st_size > 0
-    )
+    """Find all suite YAML files under *evals_dir*, applying substring filters.
+
+    Handles symlinked subdirectories (``rglob`` does not follow directory
+    symlinks on some Python versions, so we glob within each child).
+    """
+    all_suites: list[Path] = []
+    for p in evals_dir.rglob("*.yaml"):
+        if not p.name.startswith("_") and not p.name.endswith("_local.yaml") and p.stat().st_size > 0:
+            all_suites.append(p)
+    # Also check immediate subdirectories that are symlinks (rglob skips them).
+    for d in evals_dir.iterdir():
+        if d.is_dir() and d.is_symlink():
+            for p in d.rglob("*.yaml"):
+                if not p.name.startswith("_") and not p.name.endswith("_local.yaml") and p.stat().st_size > 0:
+                    if p not in all_suites:
+                        all_suites.append(p)
+    all_suites.sort()
     if suite_filters:
         all_suites = [
             p for p in all_suites if any(pat in str(p) for pat in suite_filters)
@@ -79,22 +88,23 @@ def _resume_from_opik(
     evals_dir: Path,
     suite_filters: list[str],
 ) -> list[Path]:
-    """Query Opik for suites missing from *tag* and return their file paths."""
-    from .resume_missing import _discover_suites as _discover
-    from .compare_experiments import _env_of, _has_tag, _list_experiments, _make_client
+    """Find suites missing from *tag* and return their file paths.
 
-    all_suites = _discover(evals_dir, suite_filters)
+    Checks local results first (local-cache-first); falls back to the Opik
+    API when no local results match the tag.
+    """
+    from .data_source import make_source
+
+    all_suites = _discover_suites(evals_dir, suite_filters)
     if not all_suites:
         return []
 
     name_to_path = {_suite_name(p): p for p in all_suites}
-    client = _make_client()
-    exps = _list_experiments(client, limit=5000)
-    exps = [e for e in exps if _has_tag(e, tag)]
-    if env:
-        exps = [e for e in exps if _env_of(e) == env]
 
-    found_names = {e.name for e in exps}
+    source = make_source("opik", results_dir="results")
+    found = source.list_experiments(tag=tag, env=env or None, limit=5000)
+
+    found_names = set(found.keys())
     missing = [p for name, p in sorted(name_to_path.items()) if name not in found_names]
     return missing
 
@@ -119,16 +129,17 @@ def _run_one_suite(
     env: str,
     extra_args: list[str],
     retries: int,
+    *,
+    use_opik: bool = True,
 ) -> tuple[str, int, str]:
     """Run a single suite via ``agent-evals run``, returning (name, exit_code, output).
 
     Retries on failure up to *retries* times with a 2s backoff.
     """
-    cmd = [
-        "uv", "run", "agent-evals", "run", str(suite_path),
-        "--env", env, "--opik",
-        *extra_args,
-    ]
+    cmd = ["uv", "run", "agent-evals", "run", str(suite_path), "--env", env]
+    if use_opik:
+        cmd.append("--opik")
+    cmd += extra_args
     rel = suite_path.name
     max_attempts = retries + 1
     last_output = ""
@@ -144,12 +155,14 @@ def _run_one_suite(
     return rel, result.returncode, last_output
 
 
-def _prewarm_tunnel() -> str | None:
+def _prewarm_tunnel(use_opik: bool = True) -> str | None:
     """Pre-warm the Opik tunnel so parallel suites don't race to bind the port.
 
     Returns the resolved URL, or None if the tunnel couldn't start (suites
-    will retry individually).
+    will retry individually).  Skipped entirely when Opik is not in use.
     """
+    if not use_opik:
+        return None
     if os.environ.get(OPIK_URL_OVERRIDE_VAR):
         return os.environ[OPIK_URL_OVERRIDE_VAR]
     try:
@@ -172,8 +185,10 @@ def run_sweep(
     retries: int = 2,
     resume: bool = False,
     resume_file: str | None = None,
+    model: str | None = None,
     extra_args: list[str] | None = None,
     verbose: int = 0,
+    use_opik: bool = True,
 ) -> int:
     """Run a sweep — the core entry point called by ``agent-evals sweep``."""
     suite_filters = suite_filters or []
@@ -218,12 +233,15 @@ def run_sweep(
 
     # --- build extra args for agent-evals run ---
     run_extra_args: list[str] = []
+    if model:
+        run_extra_args += ["--model", model]
+    # Tags are stored in local JSON metadata regardless of Opik.
     for tag in tags:
         run_extra_args += ["--tag", tag]
     run_extra_args += extra_args
 
     # --- pre-warm the Opik tunnel ---
-    _prewarm_tunnel()
+    _prewarm_tunnel(use_opik=use_opik)
 
     # --- run suites ---
     print(f"Running {len(suites)} suite(s) against {env} (jobs={jobs}, retries={retries})")
@@ -232,7 +250,7 @@ def run_sweep(
         # Sequential: capture output per-suite and print when it completes.
         failed = 0
         for suite_path in suites:
-            name, rc, output = _run_one_suite(suite_path, env, run_extra_args, retries)
+            name, rc, output = _run_one_suite(suite_path, env, run_extra_args, retries, use_opik=use_opik)
             print(output, end="")
             if rc != 0:
                 failed += 1
@@ -246,7 +264,7 @@ def run_sweep(
 
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {
-            executor.submit(_run_one_suite, suite_path, env, run_extra_args, retries): suite_path
+            executor.submit(_run_one_suite, suite_path, env, run_extra_args, retries, use_opik=use_opik): suite_path
             for suite_path in suites
         }
         for future in as_completed(futures):
@@ -278,6 +296,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--resume", action="store_true", help="Re-run only suites missing from Opik for the first --tag.")
     parser.add_argument("--resume-file", default=None, help="Resume from an explicit file (one suite path per line).")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity.")
+    parser.add_argument("--no-opik", action="store_true", help="Skip Opik recording and tunnel (write local JSON only).")
+    parser.add_argument("--model", type=str, default=None, help="Override the LLM model for all agents in the sweep.")
     parser.add_argument("extra", nargs=argparse.REMAINDER, help="Extra args forwarded to agent-evals run (e.g. -v, --runs 3).")
     args = parser.parse_args(argv)
 
@@ -290,8 +310,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         retries=args.retries,
         resume=args.resume,
         resume_file=args.resume_file,
+        model=args.model,
         extra_args=list(args.extra) if args.extra else None,
         verbose=args.verbose,
+        use_opik=not args.no_opik,
     )
 
 

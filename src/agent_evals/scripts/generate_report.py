@@ -20,113 +20,34 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import os
 import sys
-import time
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
 
 import dotenv
 
+from .data_source import DataSource, make_source
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 dotenv.load_dotenv(_REPO_ROOT / ".env")
-
-import opik
-from agent_evals.environment import OPIK_URL_OVERRIDE_VAR
-from agent_evals.reporting.opik_target import resolve_opik_url
-
-_MAX_RETRIES = 3
-_RETRY_BACKOFF = 2.0
-
-
-def _retry(fn, *, what: str):
-    for attempt in range(1, _MAX_RETRIES + 1):
-        try:
-            return fn()
-        except Exception as exc:
-            if attempt == _MAX_RETRIES:
-                raise
-            wait = _RETRY_BACKOFF * attempt
-            print(f"  retry {attempt}/{_MAX_RETRIES} ({what}): {exc} — waiting {wait:.0f}s", file=sys.stderr)
-            time.sleep(wait)
-
-
-def _make_client() -> opik.Opik:
-    url = resolve_opik_url()
-    os.environ.setdefault(OPIK_URL_OVERRIDE_VAR, url)
-    project = os.environ.get("OPIK_PROJECT_NAME") or "Agents"
-    os.environ["OPIK_PROJECT_NAME"] = project
-    return opik.Opik(host=url, workspace="default", api_key=os.environ.get("OPIK_API_KEY"))
 
 
 # --- experiment discovery ----------------------------------------------------
 
-def _list_experiments(client, name=None, limit=5000):
-    http = client._rest_client._client_wrapper.httpx_client
-    rows = []
-    page, size = 1, 100
-    while len(rows) < limit:
-        resp = _retry(lambda: http.request(
-            "v1/private/experiments", method="GET",
-            params={"page": page, "size": size, "name": name, "dataset_deleted": False},
-        ), what=f"list experiments page {page}")
-        resp.raise_for_status()
-        content = (resp.json() or {}).get("content") or []
-        if not content:
-            break
-        for d in content:
-            rows.append(SimpleNamespace(
-                id=d.get("id"), name=d.get("name"), dataset_name=d.get("dataset_name"),
-                tags=d.get("tags") or [], created_at=d.get("created_at"),
-                metadata=d.get("metadata") or {},
-            ))
-            if len(rows) >= limit:
-                break
-        if len(content) < size:
-            break
-        page += 1
-    rows.sort(key=lambda e: e.created_at or "", reverse=True)
-    return rows
-
-
-def _env_of(exp):
-    meta = exp.metadata or {}
-    return meta.get("environment") if isinstance(meta, dict) else None
-
-
-def _has_tag(exp, tag):
-    return tag in (exp.tags or [])
-
-
-def _find_by_tag(client, tag, label, limit=5000):
-    exps = _list_experiments(client, name=None, limit=limit)
-    exps = [e for e in exps if _has_tag(e, tag)]
+def _find_by_tag(source: DataSource, tag: str, label: str, limit: int = 5000) -> dict[str, SimpleNamespace]:
+    exps = source.list_experiments(name=None, tag=tag, limit=limit)
     if not exps:
         raise SystemExit(f"{label}: no experiments found for tag={tag!r}")
-    by_name = defaultdict(list)
-    for e in exps:
-        by_name[e.name].append(e)
-    chosen = {}
-    for name, lst in by_name.items():
-        lst.sort(key=lambda e: e.created_at or "", reverse=True)
-        if len(lst) > 1:
-            print(f"Warning: {label}: {len(lst)} experiments named {name!r}; using newest.", file=sys.stderr)
-        chosen[name] = lst[0]
-    return chosen
+    return dict(exps)
 
 
-def _find_by_tags(client, tags, label, limit=5000):
-    """Merge experiments from multiple tags, taking the newest per suite name.
-
-    When the same suite name appears under more than one tag (e.g. a re-run
-    of certain evals under a new tag), the experiment with the latest
-    ``created_at`` wins.
-    """
+def _find_by_tags(source: DataSource, tags: list[str], label: str, limit: int = 5000) -> dict[str, SimpleNamespace]:
+    """Merge experiments from multiple tags, taking the newest per suite name."""
     merged: dict[str, SimpleNamespace] = {}
     for tag in tags:
         try:
-            found = _find_by_tag(client, tag, label, limit=limit)
+            found = _find_by_tag(source, tag, label, limit=limit)
         except SystemExit:
             continue
         for name, exp in found.items():
@@ -138,28 +59,6 @@ def _find_by_tags(client, tags, label, limit=5000):
 
 
 # --- per-item helpers --------------------------------------------------------
-
-def _get_items(client, experiment_id):
-    return _retry(lambda: client.get_experiment_by_id(experiment_id).get_items(),
-                  what=f"get items {experiment_id[:8]}")
-
-
-def _score_map(item):
-    out = {}
-    for fs in item.feedback_scores or []:
-        out[fs["name"]] = (fs["value"], fs.get("reason") or "")
-    return out
-
-
-def _case_name(item):
-    data = item.dataset_item_data or {}
-    return data.get("name") or "(unnamed)"
-
-
-def _trace_url(item):
-    out = item.evaluation_task_output or {}
-    return out.get("trace_url")
-
 
 def _usage(item):
     out = item.evaluation_task_output or {}
@@ -234,7 +133,7 @@ def _categorize(r):
 
 # --- build comparison data ---------------------------------------------------
 
-def build_comparison(client, exps1, exps2, score="overall"):
+def build_comparison(source: DataSource, exps1: dict[str, SimpleNamespace], exps2: dict[str, SimpleNamespace], score: str = "overall"):
     matched_names = sorted(set(exps1) & set(exps2))
     rows = []
     suite_summaries = []
@@ -242,10 +141,10 @@ def build_comparison(client, exps1, exps2, score="overall"):
     for exp_name in matched_names:
         e1 = exps1[exp_name]
         e2 = exps2[exp_name]
-        items1 = _get_items(client, e1.id)
-        items2 = _get_items(client, e2.id)
-        by_name1 = {_case_name(it): it for it in items1}
-        by_name2 = {_case_name(it): it for it in items2}
+        items1 = source.get_items(e1)
+        items2 = source.get_items(e2)
+        by_name1 = {source.case_name(it): it for it in items1}
+        by_name2 = {source.case_name(it): it for it in items2}
 
         suite_cases = []
         credits1_total = 0.0
@@ -254,8 +153,8 @@ def build_comparison(client, exps1, exps2, score="overall"):
         for case_name in sorted(set(by_name1) | set(by_name2)):
             it1 = by_name1.get(case_name)
             it2 = by_name2.get(case_name)
-            sm1 = _score_map(it1) if it1 else {}
-            sm2 = _score_map(it2) if it2 else {}
+            sm1 = source.score_map(it1) if it1 else {}
+            sm2 = source.score_map(it2) if it2 else {}
 
             if score not in sm1 and score not in sm2:
                 continue
@@ -276,8 +175,8 @@ def build_comparison(client, exps1, exps2, score="overall"):
                 exp_name=exp_name, exp_id1=e1.id, exp_id2=e2.id,
                 case_name=case_name, v1=v1, v2=v2, delta=delta,
                 reason1=r1, reason2=r2,
-                trace1=_trace_url(it1) if it1 else None,
-                trace2=_trace_url(it2) if it2 else None,
+                trace1=source.trace_url(it1) if it1 else None,
+                trace2=source.trace_url(it2) if it2 else None,
                 credits1=c1, credits2=c2,
                 all_scores1=all_scores1, all_scores2=all_scores2,
             )
@@ -751,8 +650,7 @@ def generate_html(rows, suite_summaries, only1, only2, tags1, tags2, label1, lab
 
     # Footer
     parts.append('<div class="footer"><code>Generated by agent-eval \u00b7 '
-                 f'compare_experiments --tag1 {" ".join(tags1)} --tag2 {" ".join(tags2)} --score {_esc(score)}</code><br>'
-                 f'<code>Full beta-vs-main.md: agent-api/docs/beta-vs-main.md</code></div>')
+                 f'compare_experiments --tag1 {" ".join(tags1)} --tag2 {" ".join(tags2)} --score {_esc(score)}</code></div>')
 
     parts.append(_HTML_TAIL)
     return "\n".join(parts)
@@ -803,7 +701,7 @@ def main():
     subparsers = parser.add_subparsers(dest="mode")
 
     # Default: generate report
-    gen = subparsers.add_parser("generate", help="Generate a new HTML report from Opik data")
+    gen = subparsers.add_parser("generate", help="Generate a new HTML report from Opik or local data")
     gen.add_argument("--tag1", required=True, nargs="+", help="Tag(s) for side 1 (baseline). Multiple tags are merged, newest per suite wins.")
     gen.add_argument("--tag2", required=True, nargs="+", help="Tag(s) for side 2 (under test). Multiple tags are merged, newest per suite wins.")
     gen.add_argument("--score", default="overall", help="Feedback score to compare")
@@ -812,6 +710,8 @@ def main():
     gen.add_argument("--label2", default=None, help="Label for side 2")
     gen.add_argument("--beta-context", default=None, help="Path to an HTML file with beta-changes context (optional)")
     gen.add_argument("--insights", default=None, help="Path to an HTML file with author-written insights (optional, can also be added later via add-insights)")
+    gen.add_argument("--source", default="opik", choices=("opik", "local"), help="Data source (default: opik).")
+    gen.add_argument("--results-dir", action="append", default=[], help="Path to results directory for local source (repeatable, default: results/).")
 
     # Add insights to existing report
     add = subparsers.add_parser("add-insights", help="Inject author-written insights into an existing report")
@@ -844,18 +744,18 @@ def main():
     label1 = args.label1 or tags1[0]
     label2 = args.label2 or tags2[0]
 
-    client = _make_client()
+    source = make_source(getattr(args, "source", "opik"), results_dir=getattr(args, "results_dir", []) or None)
     print(f"Discovering experiments for tags1={tags1!r}...")
-    exps1 = _find_by_tags(client, tags1, "side1")
+    exps1 = _find_by_tags(source, tags1, "side1")
     print(f"  found {len(exps1)} experiments")
     print(f"Discovering experiments for tags2={tags2!r}...")
-    exps2 = _find_by_tags(client, tags2, "side2")
+    exps2 = _find_by_tags(source, tags2, "side2")
     print(f"  found {len(exps2)} experiments")
     matched = sorted(set(exps1) & set(exps2))
     print(f"Matched: {len(matched)} suites")
 
     print(f"Building comparison (score={args.score})...")
-    rows, suite_summaries, only1, only2 = build_comparison(client, exps1, exps2, args.score)
+    rows, suite_summaries, only1, only2 = build_comparison(source, exps1, exps2, args.score)
 
     scored = [r for r in rows if r.delta is not None]
     if scored:
