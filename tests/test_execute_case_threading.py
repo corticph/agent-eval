@@ -208,3 +208,70 @@ def test_step_agent_id_carries_override_when_step_has_agent() -> None:
     assert result.step_results[0].agent_id == "agent-1"
     assert result.step_results[1].agent_id == "agent-2"
     assert client.sent_agent_ids == ["agent-1", "agent-2"]
+
+
+class _SendFailsOnClient:
+    """Returns success for every send, except the Nth, which raises."""
+
+    def __init__(self, *, fail_on_send: int) -> None:
+        self._fail_on = fail_on_send
+        self._create_counter = 0
+        self.sent_agent_ids: list[str] = []
+
+    def create_agent(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._create_counter += 1
+        return {"id": f"agent-{self._create_counter}"}
+
+    def send_message(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.sent_agent_ids.append(agent_id)
+        if len(self.sent_agent_ids) == self._fail_on:
+            raise NetworkError("connection reset by peer")
+        return {"task": {"status": {"state": "completed"}}}
+
+    def clone(self) -> "_SendFailsOnClient":
+        return self
+
+    def close(self) -> None:
+        pass
+
+
+def test_harness_failure_during_override_step_blames_step_agent() -> None:
+    case = EvaluationCase(
+        name="switch",
+        agent=Agent(name="CaseAgent"),
+        steps=[
+            _step("first"),
+            _step("second", agent=Agent(name="StepAgent")),
+        ],
+    )
+    client = _SendFailsOnClient(fail_on_send=2)
+    pool = AgentPool()
+    pool.provision([case], client)
+
+    result = execute_case(case, client, pool)
+
+    # The case-level field always means the Case Agent.
+    assert result.agent_id == "agent-1"
+    # The first step completed normally; the second is the Harness Failure.
+    assert len(result.step_results) == 2
+    assert result.step_results[0].success
+    failure_step = result.step_results[1]
+    assert failure_step.name is None
+    assert failure_step.agent_id == "agent-2"
+
+
+def test_harness_failure_before_first_step_falls_back_to_case_agent() -> None:
+    case = EvaluationCase(
+        name="early_death",
+        agent=Agent(name="CaseAgent"),
+        steps=[_step("first")],
+    )
+    client = _SendFailsOnClient(fail_on_send=1)
+    pool = AgentPool()
+    pool.provision([case], client)
+
+    result = execute_case(case, client, pool)
+
+    assert result.agent_id == "agent-1"
+    (failure_step,) = result.step_results
+    assert failure_step.agent_id == "agent-1"

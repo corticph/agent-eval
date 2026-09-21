@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from agent_evals.loader import EvaluationCase, EvaluationSuite, Step, SuiteOptions
+from agent_evals.provisioning import AgentPool
 from agent_evals.runner import run_suite
 from agent_evals.schemas.agent import Agent
 from agent_evals.schemas.message import MessagePayload
@@ -441,3 +442,24 @@ def test_step_agent_and_case_agent_with_same_spec_dedup() -> None:
 
     assert client.create_count == 1
     assert client.sent_to == ["agent-1", "agent-1"]
+
+
+# ---------------------------------------------------------------------------
+# Step-level lookup guard and safe Case Agent resolution
+# ---------------------------------------------------------------------------
+
+
+def test_agent_id_for_step_raises_for_step_without_override() -> None:
+    case = _case("no_override")
+    pool = AgentPool()
+    pool.provision([case], _RecordingClient())
+
+    with pytest.raises(ValueError, match="no agent override"):
+        pool.agent_id_for_step(case.steps[0])
+
+
+def test_safe_agent_id_for_returns_none_on_lookup_failure() -> None:
+    case = _case("never_provisioned")
+    pool = AgentPool()
+
+    assert pool.safe_agent_id_for(case) is None

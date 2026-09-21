@@ -208,12 +208,18 @@ def _run_case_with_timeout(
         except (
             Exception
         ) as exc:  # defensive: clone() could raise before execute_case catches
+            case_agent_id = pool.safe_agent_id_for(case)
             result_box.append(
                 EvaluationResult(
                     name=case.name,
                     success=False,
-                    agent_id=None,
-                    step_results=[_harness_failure_step(EvalError.from_exception(exc))],
+                    agent_id=case_agent_id,
+                    step_results=[
+                        _harness_failure_step(
+                            EvalError.from_exception(exc),
+                            agent_id=case_agent_id,
+                        )
+                    ],
                 )
             )
 
@@ -234,10 +240,11 @@ def _run_case_with_timeout(
                 case.name,
                 _SHUTDOWN_GRACE_SECONDS,
             )
+        case_agent_id = pool.safe_agent_id_for(case)
         return EvaluationResult(
             name=case.name,
             success=False,
-            agent_id=None,
+            agent_id=case_agent_id,
             duration_seconds=timeout,
             step_results=[
                 _harness_failure_step(
@@ -245,7 +252,8 @@ def _run_case_with_timeout(
                         ErrorCode.EVAL_TIMEOUT,
                         f"eval exceeded wall-clock timeout of {timeout}s",
                         {"timeout_seconds": timeout},
-                    )
+                    ),
+                    agent_id=case_agent_id,
                 )
             ],
         )
@@ -302,6 +310,7 @@ def execute_case(
     stops the loop. The case succeeds only if every executed Step did.
     """
     agent_id: str | None = None
+    last_step_agent_id: str | None = None
     response: Response | None = None
     step_results: list[StepResult] = []
     start = time.perf_counter()
@@ -317,6 +326,7 @@ def execute_case(
             step_agent_id = agent_id
             if step.agent is not None:
                 step_agent_id = pool.agent_id_for_step(step)
+            last_step_agent_id = step_agent_id
             if step.delay_before_seconds is not None and step.delay_before_seconds > 0:
                 _LOGGER.debug(
                     "Sleeping %.3f seconds before step %s",
@@ -412,8 +422,14 @@ def execute_case(
     except Exception as exc:  # pragma: no cover - defensive logging
         _LOGGER.exception("Evaluation %s raised an exception", case.name)
         duration = time.perf_counter() - start
+        # The synthetic trail row blames the agent that was actually being
+        # messaged when the harness died — the Step Agent of the step in
+        # flight, falling back to the Case Agent before the first step.
+        failure_agent_id = (
+            last_step_agent_id if last_step_agent_id is not None else agent_id
+        )
         step_results.append(_harness_failure_step(
-            EvalError.from_exception(exc), agent_id=agent_id
+            EvalError.from_exception(exc), agent_id=failure_agent_id
         ))
         return EvaluationResult(
             name=case.name,

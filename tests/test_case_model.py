@@ -256,3 +256,32 @@ def test_step_parses_use_connector_name(tmp_path: Path) -> None:
     (case,) = load_suite(_write_suite(tmp_path, STEP_USE_CONNECTOR)).cases
     assert case.steps[0].use_connector_name is None
     assert case.steps[1].use_connector_name == "research"
+
+
+STEP_EMPTY_AGENT = """\
+name: empty_agent_suite
+evals:
+  - name: switch
+    agent:
+      name: CaseAgent
+    steps:
+      - name: first
+        message:
+          message:
+            parts:
+              - kind: text
+                text: hello
+      - name: second
+        agent: {}
+        message:
+          message:
+            parts:
+              - kind: text
+                text: switch
+"""
+
+
+def test_empty_agent_spec_means_no_override(tmp_path: Path) -> None:
+    (case,) = load_suite(_write_suite(tmp_path, STEP_EMPTY_AGENT)).cases
+    assert case.steps[0].agent is None
+    assert case.steps[1].agent is None

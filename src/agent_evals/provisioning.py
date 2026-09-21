@@ -192,5 +192,25 @@ class AgentPool:
         return self._by_key[self._agent_key(case.agent, case.use_connector_name)]
 
     def agent_id_for_step(self, step: Step) -> str:
-        """Return the provisioned agent id for a step-level agent override."""
+        """Return the provisioned agent id for a step-level agent override.
+
+        Raises :class:`ValueError` when the step has no agent override — a
+        mis-call surfaces as a programming error, not a silent fallback.
+        """
+        if step.agent is None:
+            raise ValueError(
+                "agent_id_for_step called for a step with no agent override"
+            )
         return self._by_key[self._agent_key(step.agent, step.use_connector_name)]
+
+    def safe_agent_id_for(self, case: EvaluationCase) -> str | None:
+        """Resolve the Case Agent from the pool, or ``None`` on lookup failure.
+
+        The one safe-lookup the timeout handlers share: provisioning has
+        already happened, so the lookup normally succeeds — but a broken
+        pool state must not turn a timeout into a crash.
+        """
+        try:
+            return self.agent_id_for(case)
+        except KeyError:
+            return None

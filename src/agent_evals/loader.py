@@ -82,7 +82,7 @@ class Step:
             else None
         )
         step_agent: Agent | None = None
-        if "agent" in data and data["agent"] is not None:
+        if data.get("agent"):
             # Standalone: no merge with globals or case agent — the step's
             # agent spec is parsed as-is, with variable resolution and
             # validation but no inherited defaults.

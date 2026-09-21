@@ -153,6 +153,8 @@ class StepResult:
     # The conversation identifier (Opik threads are keyed by it) — stamped once
     # by execution; there is no separate trace id.
     context_id: str | None = None
+    # The agent that actually messaged this step — the Step Agent for an
+    # override step, the Case Agent otherwise (see ADR-0001).
     agent_id: str | None = None
     usage: UsageMetrics | None = None
     # The per-term ``ExpectationResult`` list — the source of truth both sinks
@@ -206,6 +208,8 @@ class EvaluationResult:
 
     name: str
     success: bool
+    # Always the Case Agent — the case's default agent, one fixed meaning
+    # (see ADR-0001). Per-step attribution lives on ``StepResult.agent_id``.
     agent_id: str | None
     duration_seconds: float | None = None
     step_results: list[StepResult] = field(default_factory=list)

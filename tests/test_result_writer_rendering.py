@@ -334,3 +334,85 @@ def test_markdown_passing_case_renders_no_errors_line(tmp_path) -> None:
     markdown = _markdown(tmp_path, case, result)
 
     assert "**Errors:**" not in markdown
+
+
+def test_json_step_rows_carry_step_agent_id(tmp_path) -> None:
+    case = EvaluationCase(
+        name="switch",
+        agent=Agent(name="CaseAgent"),
+        steps=[
+            Step(message=MessagePayload(), name="first"),
+            Step(message=MessagePayload(), name="second"),
+        ],
+    )
+    result = EvaluationResult(
+        name="switch",
+        success=True,
+        agent_id="agent-1",
+        step_results=[
+            StepResult(
+                name="first",
+                success=True,
+                request=MessagePayload(),
+                response=None,
+                agent_id="agent-1",
+            ),
+            StepResult(
+                name="second",
+                success=True,
+                request=MessagePayload(),
+                response=None,
+                agent_id="agent-2",
+            ),
+        ],
+    )
+
+    entries = _json_entries(tmp_path, case, result)
+
+    step_rows = [e for e in entries if e.get("is_step_result")]
+    assert len(step_rows) == 2
+    # Each step row carries its own agent id, not the case-level one.
+    assert step_rows[0]["agent_id"] == "agent-1"
+    assert step_rows[1]["agent_id"] == "agent-2"
+
+
+def test_markdown_shows_step_agent_id_when_different(tmp_path) -> None:
+    case = EvaluationCase(
+        name="switch",
+        agent=Agent(name="CaseAgent"),
+        steps=[
+            Step(message=MessagePayload(), name="first"),
+            Step(message=MessagePayload(), name="second"),
+        ],
+    )
+    result = EvaluationResult(
+        name="switch",
+        success=True,
+        agent_id="agent-1",
+        step_results=[
+            StepResult(
+                name="first",
+                success=True,
+                request=MessagePayload(),
+                response=None,
+                agent_id="agent-1",
+            ),
+            StepResult(
+                name="second",
+                success=True,
+                request=MessagePayload(),
+                response=None,
+                agent_id="agent-2",
+            ),
+        ],
+    )
+
+    markdown = _markdown(tmp_path, case, result)
+
+    step_sections = markdown.split("#### ")
+    first_section = next(s for s in step_sections if s.startswith("first"))
+    second_section = next(s for s in step_sections if s.startswith("second"))
+    # The step matching the Case Agent stays quiet about agent ids.
+    assert "Agent ID" not in first_section
+    # The step with a different agent shows it.
+    assert "`agent-2`" in second_section
