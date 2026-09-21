@@ -145,10 +145,11 @@ def _deep_match(expected: Any, actual: Any) -> bool:
 
 
 class MustMatch(Expectation):
-    """Each regex must match (``re.search``) the response's full JSON.
+    """Each regex must match (``re.search``) the response's plain text.
 
     Use when a phrase has acceptable synonyms — an alternation ``must_include``
-    (literal AND) cannot express.
+    (literal AND) cannot express — or when the pattern needs real text
+    features like ``(?m)`` line anchors.
     """
 
     key = "must_match"
@@ -170,7 +171,7 @@ class MustMatch(Expectation):
         checks = [
             _term_check(
                 pattern,
-                bool(re.search(pattern, ctx.haystack)),
+                bool(re.search(pattern, ctx.plain_text)),
                 f"no match for required pattern: {pattern!r}",
             )
             for pattern in self.patterns

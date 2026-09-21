@@ -169,6 +169,14 @@ def test_must_match_regex_alternation():
     assert not checks[1].passed
 
 
+def test_must_match_multiline_anchors_against_plain_text():
+    results = _resolve(
+        {"must_match": [r"(?m)^\s*[-*]\s"]},
+        _text_response("- Your name is Leo.\n- You are 30 years old."),
+    )
+    assert results["must_match"].passed
+
+
 # --- jsonpath / must_include_json -------------------------------------------
 
 
