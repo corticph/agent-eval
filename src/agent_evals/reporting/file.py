@@ -121,7 +121,7 @@ class FileSink:
                     lines.append(f"#### {step_result.name}")
                     step_status = "✅ Passed" if step_result.success else "❌ Failed"
                     lines.append(f"- **Status:** {step_status}")
-                    if step_result.agent_id and step_result.agent_id != result.agent_id:
+                    if step_result.agent_id != result.agent_id:
                         lines.append(
                             f"- **Agent ID:** `{step_result.agent_id}`"
                         )

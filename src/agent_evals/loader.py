@@ -68,6 +68,7 @@ class Step:
         *,
         base_variables: dict[str, str],
         message_defaults: dict[str, Any] | None = None,
+        case_agent_dict: dict[str, Any] | None = None,
     ) -> "Step":
         # A step in a ``steps:`` list must name itself, so the Step Trail is legible.
         if "name" not in data:
@@ -83,10 +84,11 @@ class Step:
         )
         step_agent: Agent | None = None
         if data.get("agent"):
-            # Standalone: no merge with globals or case agent — the step's
-            # agent spec is parsed as-is, with variable resolution and
-            # validation but no inherited defaults.
+            # Delta-merge over the case's resolved agent so ``agent:`` means
+            # the same thing at every level — a delta that deep-merges over
+            # the parent.
             step_agent = _merge_agent(
+                case_agent_dict or {},
                 data["agent"],
                 variables=step_variables,
                 source_name=data["name"],
@@ -124,25 +126,31 @@ class EvaluationCase:
         message_defaults: dict[str, Any] | None = None,
     ) -> "EvaluationCase":
         base_variables = _extend_variables(variables or {}, data)
+        name = data.get("name")
+        # Resolve the agent dict (variables resolved) so step agents can
+        # delta-merge over it, but defer validation/typing until after the
+        # shape check — a retired authoring format's shape diagnosis wins
+        # over an agent error.
+        case_agent_dict = _merge_and_resolve(
+            agent_defaults or {},
+            data.get("agent", {}),
+            variables=base_variables,
+        )
         # Shape before envelope: a case from a retired authoring format has
         # neither `message` nor `steps`, and that diagnosis is worth more to
         # the author than a complaint about whichever envelope key is read
         # first.
-        name = data.get("name")
         steps = _normalize_steps(
             data,
             base_variables=base_variables,
             message_defaults=message_defaults,
             case_name=name or "<unnamed>",
+            case_agent_dict=case_agent_dict,
         )
         if not name:
             raise ValueError("every eval must declare a 'name'")
-        agent = _merge_agent(
-            agent_defaults or {},
-            data.get("agent", {}),
-            variables=base_variables,
-            source_name=name,
-        )
+        _validate_agent_payload(case_agent_dict, source_name=name)
+        agent = Agent.from_dict(case_agent_dict)
         agent_id_override = _extract_agent_id_override(data, variables=base_variables)
         if "use_expert_name" in data:  # v1-fail-fast-guard
             raise ValueError(
@@ -231,6 +239,7 @@ def _normalize_steps(
     base_variables: dict[str, str],
     message_defaults: dict[str, Any] | None,
     case_name: str,
+    case_agent_dict: dict[str, Any] | None = None,
 ) -> list[Step]:
     """Collapse both authoring shapes into an ordered ``list[Step]`` (length ≥ 1).
 
@@ -247,6 +256,7 @@ def _normalize_steps(
                 step_data,
                 base_variables=base_variables,
                 message_defaults=message_defaults,
+                case_agent_dict=case_agent_dict,
             )
             for step_data in raw_steps
         ]

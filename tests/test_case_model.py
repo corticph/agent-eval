@@ -207,15 +207,18 @@ evals:
 """
 
 
-def test_step_agent_is_standalone_not_merged_with_globals(tmp_path: Path) -> None:
+def test_step_agent_delta_merges_over_case_agent(tmp_path: Path) -> None:
     (case,) = load_suite(_write_suite(tmp_path, STEP_AGENT_STANDALONE)).cases
     assert case.steps[0].agent is None
     step_agent = case.steps[1].agent
     assert step_agent is not None
     assert step_agent.name == "StepAgent"
     assert step_agent.description == "Step-level agent"
-    assert step_agent.system_prompt is None
-    assert step_agent.connectors == []
+    # The step agent inherits the case agent's system prompt and connectors
+    # (which themselves inherited from globals) via deep-merge.
+    assert step_agent.system_prompt is not None
+    assert "global assistant" in step_agent.system_prompt
+    assert step_agent.connectors == [{"type": "registry", "name": "global_tool"}]
 
 
 STEP_USE_CONNECTOR = """\

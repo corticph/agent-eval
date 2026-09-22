@@ -185,11 +185,16 @@ class AgentPool:
                         client, step.agent.to_dict(), step.use_connector_name
                     )
 
+    # Two public methods: different input types (EvaluationCase vs Step) and
+    # different pre-checks (override vs None guard) share one _lookup core.
+    def _lookup(self, agent: Agent, use_connector_name: str | None) -> str:
+        return self._by_key[self._agent_key(agent, use_connector_name)]
+
     def agent_id_for(self, case: EvaluationCase) -> str:
         """Return the provisioned (or overridden) agent id for a case."""
         if case.agent_id_override:
             return case.agent_id_override
-        return self._by_key[self._agent_key(case.agent, case.use_connector_name)]
+        return self._lookup(case.agent, case.use_connector_name)
 
     def agent_id_for_step(self, step: Step) -> str:
         """Return the provisioned agent id for a step-level agent override.
@@ -201,16 +206,4 @@ class AgentPool:
             raise ValueError(
                 "agent_id_for_step called for a step with no agent override"
             )
-        return self._by_key[self._agent_key(step.agent, step.use_connector_name)]
-
-    def safe_agent_id_for(self, case: EvaluationCase) -> str | None:
-        """Resolve the Case Agent from the pool, or ``None`` on lookup failure.
-
-        The one safe-lookup the timeout handlers share: provisioning has
-        already happened, so the lookup normally succeeds — but a broken
-        pool state must not turn a timeout into a crash.
-        """
-        try:
-            return self.agent_id_for(case)
-        except KeyError:
-            return None
+        return self._lookup(step.agent, step.use_connector_name)
