@@ -336,7 +336,7 @@ def test_markdown_passing_case_renders_no_errors_line(tmp_path) -> None:
     assert "**Errors:**" not in markdown
 
 
-def test_json_step_rows_carry_step_agent_id(tmp_path) -> None:
+def test_step_agent_id_renders_correctly_in_json_and_markdown(tmp_path) -> None:
     case = EvaluationCase(
         name="switch",
         agent=Agent(name="CaseAgent"),
@@ -366,6 +366,8 @@ def test_json_step_rows_carry_step_agent_id(tmp_path) -> None:
             ),
         ],
     )
+
+    # --- JSON assertions ---
 
     entries = _json_entries(tmp_path, case, result)
 
@@ -375,37 +377,7 @@ def test_json_step_rows_carry_step_agent_id(tmp_path) -> None:
     assert step_rows[0]["agent_id"] == "agent-1"
     assert step_rows[1]["agent_id"] == "agent-2"
 
-
-def test_markdown_shows_step_agent_id_when_different(tmp_path) -> None:
-    case = EvaluationCase(
-        name="switch",
-        agent=Agent(name="CaseAgent"),
-        steps=[
-            Step(message=MessagePayload(), name="first"),
-            Step(message=MessagePayload(), name="second"),
-        ],
-    )
-    result = EvaluationResult(
-        name="switch",
-        success=True,
-        agent_id="agent-1",
-        step_results=[
-            StepResult(
-                name="first",
-                success=True,
-                request=MessagePayload(),
-                response=None,
-                agent_id="agent-1",
-            ),
-            StepResult(
-                name="second",
-                success=True,
-                request=MessagePayload(),
-                response=None,
-                agent_id="agent-2",
-            ),
-        ],
-    )
+    # --- Markdown assertions ---
 
     markdown = _markdown(tmp_path, case, result)
 
