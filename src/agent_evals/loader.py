@@ -84,9 +84,6 @@ class Step:
         )
         step_agent: Agent | None = None
         if data.get("agent"):
-            # Delta-merge over the case's resolved agent so ``agent:`` means
-            # the same thing at every level — a delta that deep-merges over
-            # the parent.
             step_agent = _merge_agent(
                 case_agent_dict or {},
                 data["agent"],
@@ -127,10 +124,6 @@ class EvaluationCase:
     ) -> "EvaluationCase":
         base_variables = _extend_variables(variables or {}, data)
         name = data.get("name")
-        # Resolve the agent dict (variables resolved) so step agents can
-        # delta-merge over it, but defer validation/typing until after the
-        # shape check — a retired authoring format's shape diagnosis wins
-        # over an agent error.
         case_agent_dict = _merge_and_resolve(
             agent_defaults or {},
             data.get("agent", {}),
