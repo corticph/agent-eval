@@ -54,7 +54,7 @@ class FileSink:
                 "parent_name": result.name,
                 "step_name": step.name,
                 "success": step.success,
-                "agent_id": result.agent_id,
+                "agent_id": step.agent_id,
                 "request": step.request.to_dict() if step.request is not None else None,
                 "response": _response_to_dict(step.response),
                 "harness_error": step.harness_error.to_dict()
@@ -121,6 +121,10 @@ class FileSink:
                     lines.append(f"#### {step_result.name}")
                     step_status = "✅ Passed" if step_result.success else "❌ Failed"
                     lines.append(f"- **Status:** {step_status}")
+                    if step_result.agent_id != result.agent_id:
+                        lines.append(
+                            f"- **Agent ID:** `{step_result.agent_id}`"
+                        )
                     if step_result.duration_seconds is not None:
                         lines.append(
                             f"- **Duration:** {step_result.duration_seconds:.3f}s"

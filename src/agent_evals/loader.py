@@ -58,6 +58,8 @@ class Step:
     expectations: list[Expectation] = field(default_factory=list)
     delay_before_seconds: float | None = None
     name: str | None = None
+    agent: Agent | None = None
+    use_connector_name: str | None = None
 
     @classmethod
     def from_dict(
@@ -66,6 +68,7 @@ class Step:
         *,
         base_variables: dict[str, str],
         message_defaults: dict[str, Any] | None = None,
+        case_agent_dict: dict[str, Any] | None = None,
     ) -> "Step":
         # A step in a ``steps:`` list must name itself, so the Step Trail is legible.
         if "name" not in data:
@@ -79,11 +82,22 @@ class Step:
             if "delay_before_seconds" in data
             else None
         )
+        step_agent: Agent | None = None
+        if data.get("agent"):
+            step_agent = _merge_agent(
+                case_agent_dict or {},
+                data["agent"],
+                variables=step_variables,
+                source_name=data["name"],
+            )
+        use_connector_name = data.get("use_connector_name") or None
         return cls(
             message=message,
             expectations=expectations,
             delay_before_seconds=delay_before_seconds,
             name=data["name"],
+            agent=step_agent,
+            use_connector_name=use_connector_name,
         )
 
 
@@ -109,25 +123,27 @@ class EvaluationCase:
         message_defaults: dict[str, Any] | None = None,
     ) -> "EvaluationCase":
         base_variables = _extend_variables(variables or {}, data)
+        name = data.get("name")
+        case_agent_dict = _merge_and_resolve(
+            agent_defaults or {},
+            data.get("agent", {}),
+            variables=base_variables,
+        )
         # Shape before envelope: a case from a retired authoring format has
         # neither `message` nor `steps`, and that diagnosis is worth more to
         # the author than a complaint about whichever envelope key is read
         # first.
-        name = data.get("name")
         steps = _normalize_steps(
             data,
             base_variables=base_variables,
             message_defaults=message_defaults,
             case_name=name or "<unnamed>",
+            case_agent_dict=case_agent_dict,
         )
         if not name:
             raise ValueError("every eval must declare a 'name'")
-        agent = _merge_agent(
-            agent_defaults or {},
-            data.get("agent", {}),
-            variables=base_variables,
-            case_name=name,
-        )
+        _validate_agent_payload(case_agent_dict, source_name=name)
+        agent = Agent.from_dict(case_agent_dict)
         agent_id_override = _extract_agent_id_override(data, variables=base_variables)
         if "use_expert_name" in data:  # v1-fail-fast-guard
             raise ValueError(
@@ -216,6 +232,7 @@ def _normalize_steps(
     base_variables: dict[str, str],
     message_defaults: dict[str, Any] | None,
     case_name: str,
+    case_agent_dict: dict[str, Any] | None = None,
 ) -> list[Step]:
     """Collapse both authoring shapes into an ordered ``list[Step]`` (length ≥ 1).
 
@@ -232,6 +249,7 @@ def _normalize_steps(
                 step_data,
                 base_variables=base_variables,
                 message_defaults=message_defaults,
+                case_agent_dict=case_agent_dict,
             )
             for step_data in raw_steps
         ]
@@ -407,7 +425,7 @@ def _merge_and_resolve(
 
 
 def _merge_agent(
-    *payloads: dict[str, Any], variables: dict[str, str], case_name: str
+    *payloads: dict[str, Any], variables: dict[str, str], source_name: str
 ) -> Agent:
     """Deep-merge agent dicts, resolve variables, validate, and build an :class:`Agent`.
 
@@ -415,24 +433,26 @@ def _merge_agent(
     reuse it) and returns the typed agent object used by evaluation cases.
     """
     merged = _merge_and_resolve(*payloads, variables=variables)
-    _validate_agent_payload(merged, case_name=case_name)
+    _validate_agent_payload(merged, source_name=source_name)
     return Agent.from_dict(merged)
 
 
-def _validate_agent_payload(agent_payload: dict[str, Any], *, case_name: str) -> None:
+def _validate_agent_payload(
+    agent_payload: dict[str, Any], *, source_name: str
+) -> None:
     """Reject the retired v1 agent shape and disallowed whitespace in names."""
 
     for legacy_key in ("experts", "mcpServers"):  # v1-fail-fast-guard
         if legacy_key in agent_payload:
             raise ValueError(
-                f"Agent for case {case_name!r} uses the retired {legacy_key!r} key; "  # v1-fail-fast-guard
+                f"Agent for {source_name!r} uses the retired {legacy_key!r} key; "  # v1-fail-fast-guard
                 "author v2 'connectors' instead"
             )
 
     agent_name = agent_payload.get("name")
     if isinstance(agent_name, str) and _contains_whitespace(agent_name):
         raise ValueError(
-            f"Agent name for eval {case_name!r} cannot contain whitespace: {agent_name!r}"
+            f"Agent name for {source_name!r} cannot contain whitespace: {agent_name!r}"
         )
 
     connectors = agent_payload.get("connectors")
@@ -445,13 +465,14 @@ def _validate_agent_payload(agent_payload: dict[str, Any], *, case_name: str) ->
         connector_name = connector.get("name")
         if isinstance(connector_name, str) and _contains_whitespace(connector_name):
             raise ValueError(
-                f"Connector name at index {index} for case {case_name!r} cannot contain whitespace: {connector_name!r}"
+                f"Connector name at index {index} for {source_name!r} cannot contain whitespace: {connector_name!r}"
             )
         # An inline agent connector embeds a full create payload; hold it to
         # the same rules as the agent that carries it.
         if connector.get("type") == "agent" and not connector.get("agentId"):
             _validate_agent_payload(
-                {k: v for k, v in connector.items() if k != "type"}, case_name=case_name
+                {k: v for k, v in connector.items() if k != "type"},
+                source_name=source_name,
             )
 
 

@@ -25,7 +25,7 @@ def test_validate_agent_payload_rejects_experts() -> None:
     with pytest.raises(ValueError, match=r"experts"):
         _validate_agent_payload(
             {"name": "Agent", "experts": [{"name": "x"}]},
-            case_name="case1",
+            source_name="case1",
         )
 
 
@@ -33,7 +33,7 @@ def test_validate_agent_payload_rejects_mcp_servers() -> None:
     with pytest.raises(ValueError, match=r"mcpServers"):
         _validate_agent_payload(
             {"name": "Agent", "mcpServers": [{"name": "x"}]},
-            case_name="case1",
+            source_name="case1",
         )
 
 
@@ -41,7 +41,7 @@ def test_validate_agent_payload_error_mentions_retired_key() -> None:
     with pytest.raises(ValueError, match=r"retired.*connectors"):
         _validate_agent_payload(
             {"name": "Agent", "experts": []},
-            case_name="case1",
+            source_name="case1",
         )
 
 
@@ -49,7 +49,7 @@ def test_validate_agent_payload_accepts_v2_agent() -> None:
     # A clean v2 agent payload must pass — no false positives.
     _validate_agent_payload(
         {"name": "Agent", "connectors": [{"type": "registry", "name": "x"}]},
-        case_name="case1",
+        source_name="case1",
     )
 
 

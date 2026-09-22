@@ -296,3 +296,16 @@ def test_timeout_not_hit_leaves_result_untouched() -> None:
     assert len(results) == 1
     assert results[0].success is True
     assert results[0].step_results[0].harness_error is None
+
+
+def test_timeout_result_carries_case_agent_id() -> None:
+    slow = _case("slow", timeout_seconds=0.05)
+    results = run_suite(_suite([slow], concurrency=1), _FakeClient(delay=0.5))
+
+    assert len(results) == 1
+    result = results[0]
+    # The case-level field is the Case Agent, resolved from the pool.
+    assert result.agent_id == "agent-1"
+    # The synthetic trail row also carries the Case Agent id.
+    (timeout_step,) = result.step_results
+    assert timeout_step.agent_id == "agent-1"
