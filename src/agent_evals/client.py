@@ -94,6 +94,31 @@ class AgentClient:
                 f"Request timed out: {method} {url}\n"
                 f"The service at {self.environment.base_url} did not respond in time."
             ) from exc
+
+        # On 401, refresh the token and retry once.
+        if response.status_code == 401:
+            _LOGGER.info("Got 401, refreshing OAuth token and retrying %s %s", method, url)
+            self._refresh_token()
+            try:
+                response = self.session.request(
+                    method,
+                    url,
+                    json=json_body,
+                    params=params,
+                    headers=headers,
+                    timeout=timeout,
+                )
+            except requests.ConnectionError as exc:
+                raise NetworkError(
+                    f"Connection failed: could not reach {self.environment.base_url}\n"
+                    f"Is the service running?"
+                ) from exc
+            except requests.Timeout as exc:
+                raise RequestTimeoutError(
+                    f"Request timed out: {method} {url}\n"
+                    f"The service at {self.environment.base_url} did not respond in time."
+                ) from exc
+
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
@@ -114,6 +139,11 @@ class AgentClient:
             raise InvalidResponseError(
                 f"Response was not valid JSON for {method} {url}"
             ) from exc
+
+    def _refresh_token(self) -> None:
+        """Force a new OAuth token and update the session headers."""
+        self.environment.invalidate_token()
+        self.session.headers.update(self.environment.headers())
 
     def create_agent(
         self,
