@@ -177,6 +177,77 @@ def test_must_match_multiline_anchors_against_plain_text():
     assert results["must_match"].passed
 
 
+def test_must_match_regex_against_data_parts():
+    """must_match must also search the JSON haystack so tool-call content
+    in data parts (e.g. keywords in a search_cpoe_catalog call) is gradeable."""
+    response = _data_response({"requests": [{"keywords": ["emdu", "konsil"]}]})
+    results = _resolve(
+        {"must_match": [r"(?i)\bemdu\b", r"(?i)\bkonsil\b"]},
+        response,
+    )
+    assert results["must_match"].passed
+
+
+def test_must_match_tool_name_in_data_part():
+    """Tool-call content like single_select appears only in data parts, not text.
+    The tool name itself (ask_user_questions) appears in the JSON haystack as
+    part of the tool-call envelope, while the structured content lives in the
+    data part."""
+    response = {
+        "task": {
+            "status": {
+                "message": {
+                    "parts": [
+                        {"data": {"questions": [{"kind": "single_select"}]}}
+                    ]
+                }
+            }
+        }
+    }
+    results = _resolve(
+        {"must_match": ["single_select"]},
+        response,
+    )
+    assert results["must_match"].passed
+
+
+def test_must_match_fails_when_pattern_in_neither_surface():
+    results = _resolve(
+        {"must_match": [r"(?i)\bnonexistent\b"]},
+        _data_response({"requests": [{"keywords": ["emdu"]}]}),
+    )
+    assert not results["must_match"].passed
+    assert "no match" in results["must_match"].checks[0].detail
+
+
+def test_must_match_cpoe_shaped_data_only_response():
+    """CPOE-shaped case: a data-only search_cpoe_catalog response with no
+    text parts.  must_match must find the keywords in the JSON haystack."""
+    response = _data_response({"requests": [{"keywords": ["cbc"]}]})
+    results = _resolve(
+        {"must_match": [r"(?i)\bcbc\b"]},
+        response,
+    )
+    assert results["must_match"].passed
+
+
+def test_must_match_matches_either_plain_text_or_haystack():
+    """When the same pattern matches in plain_text, it passes even if
+    the haystack would also match — and vice versa."""
+    # Text part carries the phrase, data part carries something else.
+    response = {
+        "task": {
+            "status": {"message": {"parts": [{"text": "the liver panel"}]}},
+            "artifacts": [{"parts": [{"data": {"action": "SELECT"}}]}],
+        }
+    }
+    results = _resolve(
+        {"must_match": [r"(?i)\bliver\b", r"(?i)\bSELECT\b"]},
+        response,
+    )
+    assert results["must_match"].passed
+
+
 # --- jsonpath / must_include_json -------------------------------------------
 
 
