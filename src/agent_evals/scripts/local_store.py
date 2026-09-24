@@ -38,8 +38,8 @@ def _compute_feedback_scores(step_results: list[dict[str, Any]]) -> list[dict[st
     the mean of the per-type scores.
     """
     merged: dict[str, dict[str, Any]] = {}
-    for sr in step_results:
-        step_name = sr.get("name") or "null"
+    for step_idx, sr in enumerate(step_results):
+        step_name = sr.get("name") or f"step {step_idx + 1}"
         for er in sr.get("expectation_results") or []:
             key = _score_name(er)
             checks = er.get("checks") or []
@@ -66,7 +66,7 @@ def _compute_feedback_scores(step_results: list[dict[str, Any]]) -> list[dict[st
         slot = merged.setdefault("_failed", {"passed": 0, "total": 0, "reason": {}})
         slot["total"] += len(failed_steps)
         for sr in failed_steps:
-            step_name = sr.get("name") or "null"
+            step_name = sr.get("name") or f"step {step_results.index(sr) + 1}"
             he = sr.get("harness_error", {}) or {}
             slot["reason"][step_name] = he.get("message", "step failed")
 
@@ -82,8 +82,8 @@ def _compute_feedback_scores(step_results: list[dict[str, Any]]) -> list[dict[st
         any_failed = any(not sr.get("success", True) for sr in step_results)
         overall = 0.0 if any_failed else 1.0
     overall_reason = "; ".join(
-        f"{sr.get('name') or 'null'}: {c['detail']}"
-        for sr in step_results
+        f"{sr.get('name') or f'step {i + 1}'}: {c['detail']}"
+        for i, sr in enumerate(step_results)
         for er in sr.get("expectation_results") or []
         for c in er.get("checks") or []
         if not c.get("passed")
@@ -92,8 +92,8 @@ def _compute_feedback_scores(step_results: list[dict[str, Any]]) -> list[dict[st
         any_failed = any(not sr.get("success", True) for sr in step_results)
         if any_failed:
             failed_steps = [
-                f"{sr.get('name') or 'null'}: {sr.get('harness_error', {}).get('message', 'step failed')}"
-                for sr in step_results if not sr.get("success", True)
+                f"{sr.get('name') or f'step {i + 1}'}: {sr.get('harness_error', {}).get('message', 'step failed')}"
+                for i, sr in enumerate(step_results) if not sr.get("success", True)
             ]
             overall_reason = "; ".join(failed_steps) or "step failed"
         else:
@@ -121,6 +121,7 @@ def _build_item(entry: dict[str, Any]) -> SimpleNamespace:
     task_output: dict[str, Any] = {
         "step_results": step_results,
         "trace_url": entry.get("trace_url"),
+        "duration_seconds": entry.get("duration_seconds"),
     }
     # Aggregate usage from step results
     usage_parts = [sr.get("usage") for sr in step_results if sr.get("usage")]

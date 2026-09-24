@@ -300,6 +300,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--model", type=str, default=None, help="Override the LLM model for all agents in the sweep.")
     parser.add_argument("extra", nargs=argparse.REMAINDER, help="Extra args forwarded to agent-evals run (e.g. -v, --runs 3).")
     args = parser.parse_args(argv)
+    # Strip a leading "--" that argparse REMAINDER preserves.
+    extra_args = list(args.extra)
+    if extra_args and extra_args[0] == "--":
+        extra_args = extra_args[1:]
 
     return run_sweep(
         env=args.env,
@@ -311,7 +315,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         resume=args.resume,
         resume_file=args.resume_file,
         model=args.model,
-        extra_args=list(args.extra) if args.extra else None,
+        extra_args=extra_args if extra_args else None,
         verbose=args.verbose,
         use_opik=not args.no_opik,
     )

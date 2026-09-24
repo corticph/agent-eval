@@ -73,6 +73,14 @@ def _credits(item):
         return 0.0
 
 
+def _duration(item):
+    out = item.evaluation_task_output or {}
+    try:
+        return float(out.get("duration_seconds") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # --- categorize regressions --------------------------------------------------
 
 def _categorize(r):
@@ -149,6 +157,8 @@ def build_comparison(source: DataSource, exps1: dict[str, SimpleNamespace], exps
         suite_cases = []
         credits1_total = 0.0
         credits2_total = 0.0
+        duration1_total = 0.0
+        duration2_total = 0.0
 
         for case_name in sorted(set(by_name1) | set(by_name2)):
             it1 = by_name1.get(case_name)
@@ -168,6 +178,11 @@ def build_comparison(source: DataSource, exps1: dict[str, SimpleNamespace], exps
             credits1_total += c1
             credits2_total += c2
 
+            d1 = _duration(it1) if it1 else 0.0
+            d2 = _duration(it2) if it2 else 0.0
+            duration1_total += d1
+            duration2_total += d2
+
             all_scores1 = {k: v[0] for k, v in sm1.items()}
             all_scores2 = {k: v[0] for k, v in sm2.items()}
 
@@ -178,6 +193,7 @@ def build_comparison(source: DataSource, exps1: dict[str, SimpleNamespace], exps
                 trace1=source.trace_url(it1) if it1 else None,
                 trace2=source.trace_url(it2) if it2 else None,
                 credits1=c1, credits2=c2,
+                duration1=d1, duration2=d2,
                 all_scores1=all_scores1, all_scores2=all_scores2,
             )
             rows.append(row)
@@ -195,6 +211,7 @@ def build_comparison(source: DataSource, exps1: dict[str, SimpleNamespace], exps
                 delta=mean2 - mean1, n=len(scored),
                 regressed=regressed, improved=improved, unchanged=unchanged,
                 credits1=credits1_total, credits2=credits2_total,
+                duration1=duration1_total, duration2=duration2_total,
                 exp_id1=e1.id, exp_id2=e2.id,
             ))
 
@@ -231,6 +248,18 @@ def _fmt_pp(d):
     if d is None:
         return "\u2014"
     return f"{d*100:+.1f}pp"
+
+
+def _fmt_duration(seconds):
+    if seconds is None or seconds == 0:
+        return "0s"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(seconds, 60)
+    if m < 60:
+        return f"{int(m)}m{s:.0f}s"
+    h, m = divmod(m, 60)
+    return f"{int(h)}h{int(m)}m"
 
 
 _HTML_HEAD = """\
@@ -372,6 +401,8 @@ def generate_html(rows, suite_summaries, only1, only2, tags1, tags2, label1, lab
 
     total_credits1 = sum(s.credits1 for s in suite_summaries)
     total_credits2 = sum(s.credits2 for s in suite_summaries)
+    total_duration1 = sum(s.duration1 for s in suite_summaries)
+    total_duration2 = sum(s.duration2 for s in suite_summaries)
 
     # Separate 502 failures for cost analysis
     infra_502_rows = [r for r in rows if r.delta is not None and r.delta < -0.001
@@ -428,6 +459,15 @@ def generate_html(rows, suite_summaries, only1, only2, tags1, tags2, label1, lab
     parts.append(f' \u00b7 <span class="num {_delta_color(-credit_delta)}">{credit_delta:+.4f} ({credit_pct:+.1f}%)</span>')
     if infra_502_credits < 0.001 and len(infra_502_rows) > 0:
         parts.append(f' <span class="label">({len(infra_502_rows)} cases failed with 502, ~0 credits)</span>')
+    parts.append('</div>')
+
+    # Time summary
+    parts.append('<div class="summary-line" style="margin-top:0.5rem">')
+    parts.append(f'<span class="label">Time:</span> <span class="num">{_fmt_duration(total_duration1)}</span> <span class="label">{_esc(label1)}</span>')
+    parts.append(f' \u00b7 <span class="num">{_fmt_duration(total_duration2)}</span> <span class="label">{_esc(label2)}</span>')
+    duration_delta = total_duration2 - total_duration1
+    duration_pct = (duration_delta / total_duration1 * 100) if total_duration1 > 0 else 0
+    parts.append(f' \u00b7 <span class="num {_delta_color(-duration_delta)}">{_fmt_duration(abs(duration_delta))} ({duration_pct:+.1f}%)</span>')
     parts.append('</div>')
 
     # Trend bar
@@ -499,8 +539,8 @@ def generate_html(rows, suite_summaries, only1, only2, tags1, tags2, label1, lab
                                  f'<td class="num-cell {_delta_color(sd)}">{_fmt_delta(sd)}</td></tr>')
                 parts.append('</tbody></table>')
 
-            # Credits
-            parts.append(f'<p class="meta">Credits: {r.credits1:.4f} \u2192 {r.credits2:.4f}</p>')
+            # Credits + Duration
+            parts.append(f'<p class="meta">Credits: {r.credits1:.4f} \u2192 {r.credits2:.4f} \u00b7 Time: {_fmt_duration(r.duration1)} \u2192 {_fmt_duration(r.duration2)}</p>')
 
             # Reasons
             if r.reason1 or r.reason2:
@@ -555,7 +595,7 @@ def generate_html(rows, suite_summaries, only1, only2, tags1, tags2, label1, lab
                 parts.append(f'<a href="{_esc(r.trace1)}" target="_blank" class="trace-link">Trace ({_esc(label1)}) \u2197</a>')
             if r.trace2:
                 parts.append(f'<a href="{_esc(r.trace2)}" target="_blank" class="trace-link">Trace ({_esc(label2)}) \u2197</a>')
-            parts.append(f'<p class="meta">Credits: {r.credits1:.4f} \u2192 {r.credits2:.4f}</p>')
+            parts.append(f'<p class="meta">Credits: {r.credits1:.4f} \u2192 {r.credits2:.4f} \u00b7 Time: {_fmt_duration(r.duration1)} \u2192 {_fmt_duration(r.duration2)}</p>')
             parts.append('</div></details>')
         parts.append('</details>')
 
@@ -584,6 +624,26 @@ def generate_html(rows, suite_summaries, only1, only2, tags1, tags2, label1, lab
                        f'(infrastructure), consuming ~0 credits on {label2}. Excluding these, '
                        f'the effective credit usage is {valid_credits1:.4f} \u2192 {valid_credits2:.4f}.</p>')
 
+    # Time usage table
+    parts.append('<h2 id="time-usage">Time Usage by Suite</h2>')
+    parts.append('<table class="cost-table"><thead><tr>'
+                 f'<th>Suite</th><th>{_esc(label1)} time</th><th>{_esc(label2)} time</th><th>Delta</th><th>% change</th>'
+                 '</tr></thead><tbody>')
+    for s in sorted(suite_summaries, key=lambda s: s.duration2 - s.duration1, reverse=True):
+        d_delta = s.duration2 - s.duration1
+        d_pct = (d_delta / s.duration1 * 100) if s.duration1 > 0 else 0
+        parts.append(f'<tr><td>{_esc(s.name)}</td>'
+                     f'<td class="num-cell">{_fmt_duration(s.duration1)}</td>'
+                     f'<td class="num-cell">{_fmt_duration(s.duration2)}</td>'
+                     f'<td class="num-cell {_delta_color(d_delta)}">{d_delta:+.1f}s</td>'
+                     f'<td class="num-cell {_delta_color(d_delta)}">{d_pct:+.1f}%</td></tr>')
+    parts.append(f'<tr class="totals"><td>Total</td>'
+                 f'<td class="num-cell">{_fmt_duration(total_duration1)}</td>'
+                 f'<td class="num-cell">{_fmt_duration(total_duration2)}</td>'
+                 f'<td class="num-cell {_delta_color(total_duration2-total_duration1)}">{total_duration2-total_duration1:+.1f}s</td>'
+                 f'<td class="num-cell {_delta_color(total_duration2-total_duration1)}">{(total_duration2-total_duration1)/total_duration1*100 if total_duration1>0 else 0:+.1f}%</td></tr>')
+    parts.append('</tbody></table>')
+
     # Suite-by-suite breakdown
     parts.append('<h2 id="suite-breakdown">Suite Breakdown</h2>')
     suite_summaries.sort(key=lambda s: s.delta if s.delta is not None else 0)
@@ -595,7 +655,8 @@ def generate_html(rows, suite_summaries, only1, only2, tags1, tags2, label1, lab
         parts.append(f'<summary><span class="badge {_delta_color(s.delta)}">{_fmt_delta(s.delta)}</span> '
                      f'{_esc(s.name)} <span class="meta">{_fmt_score(s.mean1)} \u2192 {_fmt_score(s.mean2)} \u00b7 '
                      f'{s.regressed} regressed, {s.improved} improved, {s.unchanged} unchanged \u00b7 '
-                     f'credits: {s.credits1:.4f} \u2192 {s.credits2:.4f}</span></summary>')
+                     f'credits: {s.credits1:.4f} \u2192 {s.credits2:.4f} \u00b7 '
+                     f'time: {_fmt_duration(s.duration1)} \u2192 {_fmt_duration(s.duration2)}</span></summary>')
 
         for r in sorted(suite_rows, key=lambda r: r.delta if r.delta is not None else 0):
             case_class = _delta_color(r.delta)
@@ -619,7 +680,7 @@ def generate_html(rows, suite_summaries, only1, only2, tags1, tags2, label1, lab
                                  f'<td class="num-cell {_delta_color(sd)}">{_fmt_delta(sd)}</td></tr>')
                 parts.append('</tbody></table>')
 
-            parts.append(f'<p class="meta">Credits: {r.credits1:.4f} \u2192 {r.credits2:.4f}</p>')
+            parts.append(f'<p class="meta">Credits: {r.credits1:.4f} \u2192 {r.credits2:.4f} \u00b7 Time: {_fmt_duration(r.duration1)} \u2192 {_fmt_duration(r.duration2)}</p>')
 
             if r.reason1 or r.reason2:
                 parts.append('<div class="reasons">')

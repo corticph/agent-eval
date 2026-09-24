@@ -427,6 +427,14 @@ class Environment:
         self._token = token
         return token
 
+    def invalidate_token(self) -> None:
+        """Clear the cached token so the next ``resolve_token`` re-fetches.
+
+        Called by ``AgentClient`` after a 401 to refresh an expired OAuth
+        token mid-sweep without restarting the run.
+        """
+        self._token = None
+
     def _request_oauth_token(self) -> str:
         row = self._row
         if not row.auth_host or not row.client_id_var or not row.client_secret_var:
