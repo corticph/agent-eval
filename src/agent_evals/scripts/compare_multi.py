@@ -346,6 +346,12 @@ a[href^="#"]:hover { text-decoration: underline; }
 .sortable.sort-asc::after { content: " \\25b2"; opacity: 1; }
 .sortable.sort-desc::after { content: " \\25bc"; opacity: 1; }
 </style>
+<noscript><style>
+.tab-panel { display: block; }
+.tab-bar { display: none; }
+.controls { display: none; }
+#filter-toggle { display: none; }
+</style></noscript>
 </head>
 <body>
 <button class="theme-toggle" onclick="toggleTheme()"></button>
@@ -580,7 +586,7 @@ def generate_multi_html(
                  f"Baseline: <code>{_esc(bl)}</code></p>")
 
     # --- Toggle (affects all aggregated sections) ---
-    parts.append('<div style="margin:0.5rem 0 1rem 0"><label class="meta" style="cursor:pointer">'
+    parts.append('<div id="filter-toggle" style="margin:0.5rem 0 1rem 0"><label class="meta" style="cursor:pointer">'
                  '<input type="checkbox" id="filter-fullscore" onchange="toggleFullScoreFilter()" style="margin-right:0.3rem"/>'
                  '<strong>Show only fully-scored cases</strong> (all models have quality data — '
                  f'{total} of {total_cases} cases)'
