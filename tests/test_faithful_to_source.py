@@ -114,3 +114,32 @@ def test_disabled_when_absent(monkeypatch):
     monkeypatch.setattr(FaithfulToSource, "_judge", staticmethod(_fake))
     _eval({"must_include": ["x"]}, _response("x here", "s"))
     assert called["n"] == 0
+
+
+def test_large_sources_are_truncated_but_summary_preserved(monkeypatch):
+    """When sources exceed the budget, they are truncated but the summary is
+    always present in full — the judge must see the thing it is evaluating."""
+    captured = _install_judge(monkeypatch, (True, "PASS"))
+    big_sources = "x" * 50000
+    results = _eval(
+        {"faithful_to_source": True},
+        _response("This is the agent summary.", big_sources),
+    )
+    assert all(r.passed for r in results), results
+    prompt = captured["prompt"]
+    assert "This is the agent summary." in prompt
+    assert "...[sources truncated]" in prompt
+    assert len(prompt) < 50000
+
+
+def test_small_sources_are_not_truncated(monkeypatch):
+    """Sources under the budget are passed through unchanged."""
+    captured = _install_judge(monkeypatch, (True, "PASS"))
+    _eval(
+        {"faithful_to_source": True},
+        _response("Summary text.", "short sources"),
+    )
+    prompt = captured["prompt"]
+    assert "short sources" in prompt
+    assert "...[sources truncated]" not in prompt
+    assert "Summary text." in prompt

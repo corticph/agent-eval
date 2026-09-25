@@ -25,6 +25,9 @@ _TRACE_STABILIZE_DELAY = 2.0
 # the same lull between flushes.
 _TRACE_STABLE_POLLS = 4
 
+_MAX_PAGE_SIZE = 200
+_MAX_PAGES = 100
+
 
 def _span_count(trace: dict[str, Any] | None) -> int:
     if not trace:
@@ -86,11 +89,46 @@ def fetch_trace(
         _LOGGER.warning(
             "trace for context %s did not stabilize after %d attempts; "
             "returning last fetch with %d spans",
-            context_id, _TRACE_RETRIES, _span_count(trace),
+            context_id,
+            _TRACE_RETRIES,
+            _span_count(trace),
         )
         return trace
     _LOGGER.warning(
         "no trace available for context %s after %d attempts",
-        context_id, _TRACE_RETRIES,
+        context_id,
+        _TRACE_RETRIES,
     )
     return None
+
+
+def fetch_all_trace_pages(
+    client: AgentClient,
+    context_id: str,
+    *,
+    page_size: int = _MAX_PAGE_SIZE,
+    max_pages: int = _MAX_PAGES,
+) -> dict[str, Any] | None:
+    """Fetch every page of the OpenInference trace for *context_id*.
+
+    Unlike :func:`fetch_trace` (which polls until the span count stabilizes),
+    this walks the endpoint's ``pageToken`` / ``nextPageToken`` cursor to
+    completion, concatenating the ``traces`` arrays from each page. Returns a
+    single ``{"traces": [...]}`` dict, or ``None`` if the context has no
+    traces. Used by the ``fetch_traces`` script for one-shot trace dumps; the
+    runner uses :func:`fetch_trace` because it needs the settle policy to
+    avoid reading a half-exported trace.
+    """
+    all_traces: list[dict[str, Any]] = []
+    page_token: str | None = None
+    for _ in range(max_pages):
+        response = client.get_trace(
+            context_id, page_size=page_size, page_token=page_token
+        )
+        all_traces.extend(response.get("traces", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    if not all_traces:
+        return None
+    return {"traces": all_traces}

@@ -100,6 +100,13 @@ class TestTerminalStateGuard:
         results = _results({}, _task_response("rejected"))
         assert not results["expected_state"].passed
 
+    def test_guard_failure_detail_includes_rejection_message(self) -> None:
+        results = _results(
+            {}, _task_response("rejected", text="insufficient credits")
+        )
+        detail = results["expected_state"].checks[0].detail
+        assert "insufficient credits" in detail
+
 
 class TestExpectedState:
     def test_allows_declared_terminal_failure(self) -> None:

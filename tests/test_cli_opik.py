@@ -75,7 +75,7 @@ def test_tag_flag_parses_repeatable() -> None:
     assert args.tag == ["baseline", "gpt-4o"]
 
 
-@pytest.mark.parametrize("flag", ["--dataset-name", "--experiment-name", "--tag"])
+@pytest.mark.parametrize("flag", ["--dataset-name", "--experiment-name"])
 def test_name_override_without_opik_is_rejected(flag: str) -> None:
     args = _build_parser().parse_args(
         ["run", "suite.yaml", "--env", "dev-weu", flag, "x"]

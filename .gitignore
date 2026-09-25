@@ -6,6 +6,7 @@ results/
 .env
 .DS_Store
 .vscode/
+.codegraph/
 
-# evals/ is a local symlink to the agent-eval-cases repo (see docs/evals-link.md)
+# evals/ is a local symlink to the cases repo (see AGENTS.md § Linking the evals directory)
 /evals

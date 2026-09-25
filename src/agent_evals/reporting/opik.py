@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import fields
 from typing import Any
 
@@ -26,6 +27,7 @@ from ..expectations import (
     parse_expectations,
     registry,
 )
+from ..expectations.base import extract_plain_text
 from ..loader import EvaluationCase, EvaluationSuite, Step
 from ..results import EvaluationResult
 from ..schemas.agent import Agent
@@ -33,6 +35,12 @@ from .opik_target import resolve_opik_url
 from .trace import build_trace_url
 
 _LOGGER = logging.getLogger(__name__)
+
+_OPIK_CLOSE_MAX_RETRIES = 5
+_OPIK_CLOSE_RETRY_BACKOFF = 2.0
+
+_DATASET_MAX_RETRIES = 5
+_DATASET_RETRY_BACKOFF = 2.0
 
 # The project agent-api logs its traces to (the Environment carries its id per
 # environment for trace links); keeping evals in the same project keeps the
@@ -134,6 +142,11 @@ def _build_task_output(
             "success": step.success,
             "expectation_results": [r.to_dict() for r in step.results],
             "duration_seconds": step.duration_seconds,
+            "response_state": step.response.state if step.response else None,
+            "response_text": extract_plain_text(
+                step.response.to_dict() if step.response else None
+            )
+            or None,
         }
         trail.append(entry)
 
@@ -431,9 +444,7 @@ class OpikSink:
             api_key=os.environ.get("OPIK_API_KEY"),
         )
         name = self._dataset_name_override or suite.name
-        dataset = self._opik_client.get_or_create_dataset(
-            name=name, project_name=project
-        )
+        dataset = self._get_or_create_dataset_with_retry(name, project)
         if dataset.project_name != project:
             # Datasets from before the project default stay pinned to the project
             # they were created in: the SDK resolves the *stored* project over the
@@ -450,6 +461,35 @@ class OpikSink:
             dataset = self._opik_client.create_dataset(name=name, project_name=project)
         self._dataset = dataset
 
+    def _get_or_create_dataset_with_retry(self, name: str, project: str) -> Any:
+        """Get-or-create the dataset, retrying on 409 races.
+
+        Parallel sweeps running the same suite share one dataset; two
+        ``get_or_create_dataset`` calls landing at once can both try to create
+        and the loser gets a 409. A brief wait + retry resolves it — by the
+        next attempt the winner's dataset exists and the call becomes a get.
+        """
+        for attempt in range(1, _DATASET_MAX_RETRIES + 1):
+            try:
+                return self._opik_client.get_or_create_dataset(
+                    name=name, project_name=project
+                )
+            except Exception:
+                if attempt == _DATASET_MAX_RETRIES:
+                    raise
+                wait = _DATASET_RETRY_BACKOFF * attempt
+                _LOGGER.warning(
+                    "Dataset %r get-or-create failed (attempt %d/%d), retrying in %.1fs",
+                    name,
+                    attempt,
+                    _DATASET_MAX_RETRIES,
+                    wait,
+                    exc_info=True,
+                )
+                time.sleep(wait)
+        # Unreachable, but satisfies the type checker.
+        raise RuntimeError("unreachable")
+
     def write(self, case: EvaluationCase, result: EvaluationResult) -> None:
         self._entries.append((case, result))
 
@@ -463,10 +503,26 @@ class OpikSink:
         """
         if self._suite is None or self._opik_client is None:
             return  # on_start never ran (a later sink's on_start failed first)
-        # Rebuild every run: clear stale/renamed items first, then mirror exactly
-        # what executed. A run that executed nothing (aborted before the first
-        # Case, or fully filtered out) leaves a cleared dataset and no
-        # experiment — ``evaluate()`` on an empty dataset would only error.
+
+        for attempt in range(1, _OPIK_CLOSE_MAX_RETRIES + 1):
+            try:
+                self._close_attempt()
+                return
+            except Exception:
+                if attempt == _OPIK_CLOSE_MAX_RETRIES:
+                    raise
+                wait = _OPIK_CLOSE_RETRY_BACKOFF * attempt
+                _LOGGER.warning(
+                    "Opik close failed (attempt %d/%d), retrying in %.1fs",
+                    attempt,
+                    _OPIK_CLOSE_MAX_RETRIES,
+                    wait,
+                    exc_info=True,
+                )
+                time.sleep(wait)
+
+    def _close_attempt(self) -> None:
+        """One attempt at the full close: clear, insert, evaluate, log scores."""
         items = [_case_to_dataset_item(case) for case, _ in self._entries]
         self._dataset.clear()
         if not items:
@@ -478,29 +534,73 @@ class OpikSink:
         environment_name = self._environment.name
 
         def task(item: dict[str, Any]) -> dict[str, Any]:
-            # A no-network lookup: the result the runner already produced,
-            # keyed by the Case name the dataset item carries.
             return _build_task_output(
                 by_name[item["name"]],
                 trace_base_url=trace_base_url,
                 environment=environment_name,
             )
 
-        evaluate(
+        eval_result = evaluate(
             dataset=self._dataset,
             task=task,
             scoring_metrics=[ExpectationMetric()],
             experiment_name=self._experiment_name_override or self._suite.name,
-            # The target environment is run-level metadata read from the single
-            # authoritative source (the Environment), so two runs of the same
-            # suite against different deployments can be told apart in the
-            # Experiments table.
             experiment_config={
                 "suite": self._suite.name,
                 "environment": environment_name,
             },
             experiment_tags=self._experiment_tags,
         )
+
+        if eval_result is not None:
+            self._log_usage_scores(eval_result)
+
+    def _log_usage_scores(self, eval_result: Any) -> None:
+        """Log aggregate usage (credits, tokens) as experiment-level feedback scores.
+
+        Sums ``credits``, ``input_tokens``, and ``output_tokens`` across every
+        case's steps and logs each as an experiment score so the estimated cost
+        is visible in the Opik experiment's feedback scores panel.
+        """
+        total_credits: float | None = None
+        total_input: int | None = None
+        total_output: int | None = None
+        for _, result in self._entries:
+            usage = result.aggregate_usage()
+            if usage is None:
+                continue
+            if usage.credits is not None:
+                total_credits = (total_credits or 0) + usage.credits
+            if usage.input_tokens is not None:
+                total_input = (total_input or 0) + usage.input_tokens
+            if usage.output_tokens is not None:
+                total_output = (total_output or 0) + usage.output_tokens
+
+        scores: list[score_result.ScoreResult] = []
+        if total_credits is not None:
+            scores.append(
+                score_result.ScoreResult(name="estimated_cost", value=total_credits)
+            )
+        if total_input is not None:
+            scores.append(
+                score_result.ScoreResult(name="total_input_tokens", value=total_input)
+            )
+        if total_output is not None:
+            scores.append(
+                score_result.ScoreResult(name="total_output_tokens", value=total_output)
+            )
+        if not scores:
+            return
+
+        try:
+            experiment = self._opik_client.get_experiment_by_id(
+                eval_result.experiment_id
+            )
+            experiment.log_experiment_scores(scores)
+        except Exception:
+            _LOGGER.warning(
+                "Failed to log usage scores to Opik experiment", exc_info=True
+            )
 
     def aggregate_runs(self) -> None:
         """No-op — cross-run aggregation is not needed for Opik experiments."""
