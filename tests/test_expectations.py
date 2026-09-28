@@ -169,10 +169,71 @@ def test_must_match_regex_alternation():
     assert not checks[1].passed
 
 
-def test_must_match_multiline_anchors_against_plain_text():
+def test_must_match_multiline_anchors_require_escaped_form():
+    """``(?m)`` line anchors don't work — the haystack has no real newlines,
+    just the two chars ``\\n``. A bullet check must use the escaped form."""
+    response = _text_response("- Your name is Leo.\n- You are 30 years old.")
+    # The (?m)^ anchor does NOT match in the escaped haystack...
+    results_anchor = _resolve({"must_match": [r"(?m)^\s*[-*]\s"]}, response)
+    assert not results_anchor["must_match"].passed
+    # ...but the escaped form (a literal backslash-n before the bullet) does.
+    results_escaped = _resolve({"must_match": [r"\\n\s*[-*]\s"]}, response)
+    assert results_escaped["must_match"].passed
+
+
+def test_must_match_regex_against_data_parts():
+    """Tool-call content lives in data parts (no text). must_match finds it
+    because the data part is in the JSON haystack."""
+    response = _data_response({"requests": [{"keywords": ["emdu", "konsil"]}]})
     results = _resolve(
-        {"must_match": [r"(?m)^\s*[-*]\s"]},
-        _text_response("- Your name is Leo.\n- You are 30 years old."),
+        {"must_match": [r"(?i)\bemdu\b", r"(?i)\bkonsil\b"]},
+        response,
+    )
+    assert results["must_match"].passed
+
+
+def test_must_match_tool_name_in_data_part():
+    """Content in a data part under ``status.message`` (not artifacts) still
+    lands in the haystack."""
+    response = {
+        "task": {
+            "status": {
+                "message": {
+                    "parts": [
+                        {"data": {"questions": [{"kind": "single_select"}]}}
+                    ]
+                }
+            }
+        }
+    }
+    results = _resolve(
+        {"must_match": ["single_select"]},
+        response,
+    )
+    assert results["must_match"].passed
+
+
+def test_must_match_fails_when_pattern_in_neither_surface():
+    results = _resolve(
+        {"must_match": [r"(?i)\bnonexistent\b"]},
+        _data_response({"requests": [{"keywords": ["emdu"]}]}),
+    )
+    assert not results["must_match"].passed
+    assert "no match" in results["must_match"].checks[0].detail
+
+
+def test_must_match_searches_full_haystack_text_and_data_parts():
+    """A pattern matches whether the content sits in a text part or a data
+    part — both land in the same JSON haystack."""
+    response = {
+        "task": {
+            "status": {"message": {"parts": [{"text": "the liver panel"}]}},
+            "artifacts": [{"parts": [{"data": {"action": "SELECT"}}]}],
+        }
+    }
+    results = _resolve(
+        {"must_match": [r"(?i)\bliver\b", r"(?i)\bSELECT\b"]},
+        response,
     )
     assert results["must_match"].passed
 
