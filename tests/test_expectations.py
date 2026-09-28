@@ -170,9 +170,8 @@ def test_must_match_regex_alternation():
 
 
 def test_must_match_multiline_anchors_require_escaped_form():
-    """With haystack-only, ``(?m)`` line anchors don't match because ``json.dumps``
-    escapes newlines as the two-char sequence ``\\n``. A bullet-list check must
-    be written in escaped form, matching ``\\n`` where a line boundary sits."""
+    """``(?m)`` line anchors don't work — the haystack has no real newlines,
+    just the two chars ``\\n``. A bullet check must use the escaped form."""
     response = _text_response("- Your name is Leo.\n- You are 30 years old.")
     # The (?m)^ anchor does NOT match in the escaped haystack...
     results_anchor = _resolve({"must_match": [r"(?m)^\s*[-*]\s"]}, response)
@@ -183,8 +182,8 @@ def test_must_match_multiline_anchors_require_escaped_form():
 
 
 def test_must_match_regex_against_data_parts():
-    """must_match must also search the JSON haystack so tool-call content
-    in data parts (e.g. keywords in a search_cpoe_catalog call) is gradeable."""
+    """Tool-call content lives in data parts (no text). must_match finds it
+    because the data part is in the JSON haystack."""
     response = _data_response({"requests": [{"keywords": ["emdu", "konsil"]}]})
     results = _resolve(
         {"must_match": [r"(?i)\bemdu\b", r"(?i)\bkonsil\b"]},
@@ -194,9 +193,8 @@ def test_must_match_regex_against_data_parts():
 
 
 def test_must_match_tool_name_in_data_part():
-    """Tool-call content like ``single_select`` lives in a data part (no text
-    part), so plain_text would be empty. The full JSON haystack contains the
-    data part, so the pattern matches there."""
+    """Content in a data part under ``status.message`` (not artifacts) still
+    lands in the haystack."""
     response = {
         "task": {
             "status": {
@@ -224,21 +222,9 @@ def test_must_match_fails_when_pattern_in_neither_surface():
     assert "no match" in results["must_match"].checks[0].detail
 
 
-def test_must_match_cpoe_shaped_data_only_response():
-    """CPOE-shaped case: a data-only search_cpoe_catalog response with no
-    text parts.  must_match must find the keywords in the JSON haystack."""
-    response = _data_response({"requests": [{"keywords": ["cbc"]}]})
-    results = _resolve(
-        {"must_match": [r"(?i)\bcbc\b"]},
-        response,
-    )
-    assert results["must_match"].passed
-
-
 def test_must_match_searches_full_haystack_text_and_data_parts():
-    """must_match searches the full JSON haystack, so a pattern matches
-    whether the content lives in a text part (``liver``) or a data part
-    (``SELECT``) — both are serialized into the same haystack string."""
+    """A pattern matches whether the content sits in a text part or a data
+    part — both land in the same JSON haystack."""
     response = {
         "task": {
             "status": {"message": {"parts": [{"text": "the liver panel"}]}},

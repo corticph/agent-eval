@@ -145,20 +145,16 @@ def _deep_match(expected: Any, actual: Any) -> bool:
 
 
 class MustMatch(Expectation):
-    """Each regex must match (``re.search``) the response's full JSON.
+    """Each regex must appear somewhere in the response's full JSON.
 
-    Use when a phrase has acceptable synonyms — an alternation ``must_include``
-    (literal AND) cannot express — or to assert that a content token appears
-    anywhere in the response, including inside tool-call data parts.
+    Good for "did the agent mention X anywhere?" — including inside tool-call
+    data parts, which have no text of their own but do appear in the JSON.
 
-    The haystack is ``json.dumps`` of the task response with history stripped,
-    so newlines are escaped as the two-character sequence ``\\n`` (a literal
-    backslash followed by ``n``). Patterns that need a line boundary must
-    match this escaped form — e.g. ``\\n\\s*[-*]\\s`` for a line starting with
-    a bullet — instead of ``(?m)`` anchors, which require real newlines. For
-    precise structural assertions against a specific field, prefer
-    ``jsonpath``, which targets the value at an exact path and is immune to
-    JSON-key collisions.
+    The catch: the haystack is one JSON line, so real newlines are gone —
+    they show up as the two characters ``\\n``. A pattern that needs line
+    breaks must match that escaped form (e.g. ``\\n\\s*[-*]\\s`` for a bullet)
+    rather than ``(?m)`` anchors. To check a specific field precisely, use
+    ``jsonpath`` instead — it points at an exact path and won't match keys.
     """
 
     key = "must_match"
