@@ -152,10 +152,11 @@ class MustMatch(Expectation):
     anywhere in the response, including inside tool-call data parts.
 
     The haystack is ``json.dumps`` of the task response with history stripped,
-    so newlines are escaped as the two-character sequence ``\\n``. Patterns
-    that need real text features like ``(?m)`` line anchors must account for
-    this (e.g. match ``\\\\n`` for a line boundary, or use the JSON-escaped
-    form). For precise structural assertions against a specific field, prefer
+    so newlines are escaped as the two-character sequence ``\\n`` (a literal
+    backslash followed by ``n``). Patterns that need a line boundary must
+    match this escaped form — e.g. ``\\n\\s*[-*]\\s`` for a line starting with
+    a bullet — instead of ``(?m)`` anchors, which require real newlines. For
+    precise structural assertions against a specific field, prefer
     ``jsonpath``, which targets the value at an exact path and is immune to
     JSON-key collisions.
     """

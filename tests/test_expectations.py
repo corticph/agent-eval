@@ -194,10 +194,9 @@ def test_must_match_regex_against_data_parts():
 
 
 def test_must_match_tool_name_in_data_part():
-    """Tool-call content like single_select appears only in data parts, not text.
-    The tool name itself (ask_user_questions) appears in the JSON haystack as
-    part of the tool-call envelope, while the structured content lives in the
-    data part."""
+    """Tool-call content like ``single_select`` lives in a data part (no text
+    part), so plain_text would be empty. The full JSON haystack contains the
+    data part, so the pattern matches there."""
     response = {
         "task": {
             "status": {
