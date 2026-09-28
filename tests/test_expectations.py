@@ -169,12 +169,17 @@ def test_must_match_regex_alternation():
     assert not checks[1].passed
 
 
-def test_must_match_multiline_anchors_against_plain_text():
-    results = _resolve(
-        {"must_match": [r"(?m)^\s*[-*]\s"]},
-        _text_response("- Your name is Leo.\n- You are 30 years old."),
-    )
-    assert results["must_match"].passed
+def test_must_match_multiline_anchors_require_escaped_form():
+    """With haystack-only, ``(?m)`` line anchors don't match because ``json.dumps``
+    escapes newlines as the two-char sequence ``\\n``. A bullet-list check must
+    be written in escaped form, matching ``\\n`` where a line boundary sits."""
+    response = _text_response("- Your name is Leo.\n- You are 30 years old.")
+    # The (?m)^ anchor does NOT match in the escaped haystack...
+    results_anchor = _resolve({"must_match": [r"(?m)^\s*[-*]\s"]}, response)
+    assert not results_anchor["must_match"].passed
+    # ...but the escaped form (a literal backslash-n before the bullet) does.
+    results_escaped = _resolve({"must_match": [r"\\n\s*[-*]\s"]}, response)
+    assert results_escaped["must_match"].passed
 
 
 def test_must_match_regex_against_data_parts():
@@ -231,10 +236,10 @@ def test_must_match_cpoe_shaped_data_only_response():
     assert results["must_match"].passed
 
 
-def test_must_match_matches_either_plain_text_or_haystack():
-    """When the same pattern matches in plain_text, it passes even if
-    the haystack would also match — and vice versa."""
-    # Text part carries the phrase, data part carries something else.
+def test_must_match_searches_full_haystack_text_and_data_parts():
+    """must_match searches the full JSON haystack, so a pattern matches
+    whether the content lives in a text part (``liver``) or a data part
+    (``SELECT``) — both are serialized into the same haystack string."""
     response = {
         "task": {
             "status": {"message": {"parts": [{"text": "the liver panel"}]}},

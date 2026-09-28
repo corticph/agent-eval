@@ -145,14 +145,19 @@ def _deep_match(expected: Any, actual: Any) -> bool:
 
 
 class MustMatch(Expectation):
-    """Each regex must match (``re.search``) the response's plain text or JSON.
+    """Each regex must match (``re.search``) the response's full JSON.
 
-    A pattern passes when it matches in *either* ``ctx.plain_text``
-    (human-readable text, with real newlines) *or* ``ctx.haystack`` (the
-    full JSON, including data parts). Searching both surfaces lets regex
-    patterns assert against tool-call content that lives in data parts
-    while still supporting patterns that need real text features like
-    ``(?m)`` line anchors (which only match ``plain_text``).
+    Use when a phrase has acceptable synonyms — an alternation ``must_include``
+    (literal AND) cannot express — or to assert that a content token appears
+    anywhere in the response, including inside tool-call data parts.
+
+    The haystack is ``json.dumps`` of the task response with history stripped,
+    so newlines are escaped as the two-character sequence ``\\n``. Patterns
+    that need real text features like ``(?m)`` line anchors must account for
+    this (e.g. match ``\\\\n`` for a line boundary, or use the JSON-escaped
+    form). For precise structural assertions against a specific field, prefer
+    ``jsonpath``, which targets the value at an exact path and is immune to
+    JSON-key collisions.
     """
 
     key = "must_match"
@@ -174,10 +179,7 @@ class MustMatch(Expectation):
         checks = [
             _term_check(
                 pattern,
-                bool(
-                    re.search(pattern, ctx.plain_text)
-                    or re.search(pattern, ctx.haystack)
-                ),
+                bool(re.search(pattern, ctx.haystack)),
                 f"no match for required pattern: {pattern!r}",
             )
             for pattern in self.patterns
