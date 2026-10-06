@@ -77,12 +77,13 @@ CATEGORIES: list[dict] = [
         "all": ["input-required", "completed"],
     },
     {
-        "key": "citation-leak",
-        "title": "Agent bug: Citation markers leaking as forbidden phrases",
+        "key": "forbidden-phrase",
+        "title": "Agent bug: Forbidden phrase in response",
         "color": "red",
         "description": (
-            "Internal citation markers appear in the agent's output and match the "
-            "eval's forbidden-phrase checks."
+            "The agent's output contains a phrase that the eval explicitly "
+            "forbids (e.g., 'CANCEL', internal tool names, or English text "
+            "in a German-language context)."
         ),
         "any": ["forbidden phrase"],
     },
