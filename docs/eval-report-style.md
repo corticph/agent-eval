@@ -2,6 +2,11 @@
 
 Preferences learned for generating self-contained HTML eval reports.
 
+The report handles **N runs** (not just pairwise). Use `--tag`/`--label`
+(repeatable) to specify each run; the first run is the baseline by default
+(`--baseline 0`). The same `generate_report.py` script serves both
+pairwise (N=2) and multi-run (N>2) comparisons.
+
 ## Report generation workflow
 
 The report is generated in **two steps** so the author can inspect the
@@ -10,9 +15,8 @@ data before writing insights:
 1. **Generate** the report from Opik data (no insights yet):
    ```bash
    uv run python generate_report.py generate \
-       --tag1 staging-eu-20260908-181220 staging-eu-20260908-190243 \
-       --tag2 dev-weu-20260908-181220 dev-weu-20260908-190243 \
-       --label1 "staging-eu" --label2 "dev-weu (beta)" \
+       --tag staging-eu-20260908-181220 staging-eu-20260908-190243 --label "staging-eu" \
+       --tag dev-weu-20260908-181220 dev-weu-20260908-190243 --label "dev-weu (beta)" \
        -o report.html
    ```
 
@@ -27,15 +31,18 @@ data before writing insights:
        -o report.html --insights insights.html
    ```
 
-The `generate` subcommand accepts multiple `--tag1`/`--tag2` values;
-experiments from multiple tags are merged with the newest per suite
-name winning. This lets you combine a full sweep with a partial re-run
-(e.g. re-running a subset of evals after a branch change).
+The `generate` subcommand accepts multiple `--tag` groups (one per run);
+each `--tag` can also take multiple values, and experiments from multiple
+tags are merged with the newest per suite name winning. This lets you
+combine a full sweep with a partial re-run (e.g. re-running a subset of
+evals after a branch change). Use `--run-differences` to attach per-run
+HTML context files (repeatable, one per `--tag`/`--label` group, paired
+by position).
 
 The `add-insights` subcommand injects (or replaces) the insights
 `<details>` block in an existing report. It looks for
 `<details open id="insights">` and replaces its content; if not found,
-inserts before the beta-context section.
+inserts before the run-diff section.
 
 ### Script is the source of truth
 
@@ -57,12 +64,21 @@ inserts before the beta-context section.
 
 ## Layout
 
-- **Max width ~920px**, centered, generous padding (`3rem` top/bottom).
+- **Max width ~1100px**, centered, generous padding (`3rem` top/bottom).
+  The wider width accommodates multi-column tables for N-run comparisons.
 - **Compact summary line** — all key numbers inline on one line, not big card
-  grids. Example: `0.938 local · 0.963 staging · -2.5pp delta · 20 regressed · 7 improved · 122 unchanged`.
+  grids. Shows all N run means with deltas vs baseline. Example:
+  `0.938 local · 0.963 staging (-2.5pp) · 0.971 dev (-3.3pp) · 20 regressed · 7 improved · 122 unchanged`.
   Numbers bold and colored (red/green/neutral), labels small and faint.
-- **Slim trend bar** (8px tall) above the sections to visualize the
-  regressed/improved/unchanged proportions.
+- **Cost summary** and **time summary** lines below the summary, showing
+  all N runs' totals inline with deltas vs baseline.
+- **Slim trend bars** (8px tall, one per non-baseline run) above the
+  sections to visualize the regressed/improved/unchanged proportions.
+- **Rankings table** — runs sorted by mean score, with wins among
+  fully-scored cases and per-run deltas vs baseline.
+- **Tabbed suite breakdown** (Suite Deltas | Credits | Time | Case-by-Case)
+  is always present, even for N=2. Columns are sortable; a "fully-scored
+  only" filter toggle hides cases with infra-failure gaps.
 
 ## Linkable sections
 
@@ -71,10 +87,11 @@ inserts before the beta-context section.
   - Cases within root cause: `id="case-{cat_key}-{case_name}"`
   - Improvements: `id="imp-{case_name}"`
   - Suites: `id="suite-{suite_name}"`
-  - Cases within suites: `id="suitecase-{suite_name}-{case_name}"`
-  - Major sections: `id="root-cause-analysis"`, `id="improvements"`,
-    `id="credit-usage"`, `id="suite-breakdown"`, `id="insights"`,
-    `id="beta-context"`
+  - Cases within suites: `id="case-{suite_name}-{case_name}"`
+  - Run differences: `id="run-diff-{idx}"` (0-based, one per run with a
+    `--run-differences` file)
+  - Major sections: `id="rankings"`, `id="root-cause-analysis"`,
+    `id="improvements"`, `id="suite-breakdown"`, `id="insights"`
 - IDs are slugified: spaces → `-`, `/` → `-`, `.` → `-`, lowercased.
 - Internal links (`a[href^="#"]`) use the theme's link color with no
   underline; underline on hover.
@@ -84,7 +101,7 @@ inserts before the beta-context section.
 ## Insights section
 
 - The insights section is a `<details open id="insights">` block, inserted
-  after the controls and before the beta-context section.
+  after the controls and before the run-diff sections.
 - Insights are **author-written HTML** (not auto-generated), injected
   via the `add-insights` subcommand after the report is generated.
 - Format insights with **generous spacing**: `line-height: 1.65`,
@@ -105,7 +122,7 @@ inserts before the beta-context section.
   case name to see its detail (response text, failure reason, trace link,
   inspect command).
 - **Expand all / Collapse all** buttons at the top for power users.
-- The Insights section and Beta Changes Context are open by default;
+- The Insights section and Run Differences sections are open by default;
   everything else starts collapsed.
 
 ### Use native `<details>`/`<summary>` — never CSS `display:none` + JS toggle
@@ -128,22 +145,29 @@ inserts before the beta-context section.
 
 - **Case name** and **score** visible in the collapsed header.
 - Expanded detail includes:
-  - Per-score comparison table (score name, side1, side2, delta).
-  - Credits for this case (side1 → side2).
-  - Failure reasons from both sides in monospace blocks.
+  - Per-score comparison table (score name, all N runs).
+  - Credits for this case (all N runs).
+  - Failure reasons from all N runs in monospace blocks.
   - Opik trace links (clickable, opens in new tab).
-  - `inspect_eval` command (copy-pasteable, both sides).
-  - `fetch_traces` command (copy-pasteable, both sides) so the reader
+  - `inspect_eval` command (copy-pasteable, all N runs).
+  - `fetch_traces` command (copy-pasteable, all N runs) so the reader
     can pull the full OpenInference trace.
 
 ## Root cause analysis
 
 - Group failures by **root cause pattern**, not by suite. One pattern can span
   multiple suites.
+- Works for **N runs**. A regression is any non-baseline run worse than
+  baseline; an improvement is any non-baseline run better (and none worse).
+  A case can appear in both RCA and Improvements (one run worse, another
+  better).
+- For multi-run comparisons (N>2), each regression is categorized using
+  the **worst-scoring non-baseline run's** failure reason — not a fixed
+  side.
 - Label each as **Agent bug** (red), **Mixed** (amber), or **Improved** (green).
 - For each pattern, state the root cause explicitly in a callout box.
-- **Always inspect both sides** (staging + dev) to understand what changed.
-- **Fetch traces for both sides** when the root cause isn't obvious from the
+- **Always inspect all runs** to understand what changed.
+- **Fetch traces for all runs** when the root cause isn't obvious from the
   response text alone — the trace shows which tools were called, what
   arguments were used, and whether the tool list or token counts changed
   between environments. See [Fetching OpenInference
@@ -156,17 +180,18 @@ inserts before the beta-context section.
 
 ## Cost analysis
 
-- The report includes a **per-suite credit usage table** (sortable by
-  delta) with totals. Credits come from the `usage.credits` field in
+- The report includes a **per-suite credit usage table** (sortable) with
+  totals for all N runs. Credits come from the `usage.credits` field in
   each Opik experiment item's task output.
-- The summary line shows total credits for both sides and the percentage
-  change.
+- The cost summary line shows total credits for all N runs with deltas
+  vs baseline.
 - **When reporting credit reductions, distinguish between**:
-  - **Efficiency gains**: cases that ran successfully on both sides but
-    consumed fewer credits on the beta (leaner history, fewer LLM calls).
-  - **Infrastructure failures**: cases that failed on the beta (502,
-    timeout, connection error) and consumed ~0 credits. These inflate the
-    reduction but are not real savings.
+  - **Efficiency gains**: cases that ran successfully on all runs but
+    consumed fewer credits on a non-baseline run (leaner history, fewer
+    LLM calls).
+  - **Infrastructure failures**: cases that failed on a non-baseline run
+    (502, timeout, connection error) and consumed ~0 credits. These
+    inflate the reduction but are not real savings.
   - Compute `infra_credits / abs(total_credit_delta) * 100` to quantify
     the infrastructure contribution before claiming the reduction is from
     efficiency. Do not estimate "roughly X%" — compute it.
@@ -226,5 +251,5 @@ mode follows the same progressive-disclosure rules:
   reproduce it. Use a monospace block, small and faint. Example:
 
   ```
-  Generated by agent-eval · compare_experiments --name <suite-prefix> --tag1 staging --tag2 local-new-base-prompt
+  Generated by agent-eval · generate_report --tag staging-20260908 --label staging-eu --tag dev-weu-20260908 --label dev-weu
   ```

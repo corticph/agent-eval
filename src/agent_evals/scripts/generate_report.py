@@ -1,15 +1,32 @@
-"""Generate a self-contained HTML eval report comparing two environments.
+"""Generate a self-contained HTML eval report comparing N eval runs.
 
-This is an example script — adapt the categorization, styling, and layout
-to your own eval workflow. The two-step workflow (generate + add-insights)
-lets you inject author-written analysis with clickable links to specific
-sections/cases.
+A pairwise comparison is just a special case of multi-run comparison (N=2).
+This script handles 2+ runs in a single pass, showing every run's score per
+case/suite with deltas relative to a chosen baseline.
 
-Usage:
+Usage (2 runs)::
+
     uv run python -m agent_evals.scripts.generate_report generate \
-        --tag1 staging-eu-20260908-181220 --tag2 dev-weu-20260908-181220 \
-        --label1 "staging-eu" --label2 "dev-weu (beta)" \
+        --tag staging-eu-20260910-134632 --label "staging-eu" \
+        --tag dev-weu-20260910-134632 --label "dev-weu" \
         -o report.html
+
+Usage (4 runs)::
+
+    uv run python -m agent_evals.scripts.generate_report generate \
+        --tag staging-eu-20260910-134632 --label "staging-eu" \
+        --tag dev-weu-20260910-134632 --label "dev (default)" \
+        --tag dev-weu-corti-s1-20260910-142440 --label "dev (corti-s1)" \
+        --tag dev-weu-corti-s1-instant-20260910-142440 --label "dev (instant)" \
+        --baseline 0 \
+        -o report.html
+
+The first ``--tag/--label`` pair is the baseline by default; all deltas are
+computed relative to it. Use ``--baseline N`` to pick a different baseline by
+index (0-based).
+
+The two-step workflow (generate + add-insights) lets you inject author-written
+analysis with clickable links to specific sections/cases::
 
     uv run python -m agent_evals.scripts.generate_report add-insights \
         -o report.html --insights insights.html
@@ -19,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import html
-import json
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -81,57 +97,74 @@ def _duration(item):
         return 0.0
 
 
+# --- infrastructure-failure detection -----------------------------------------
+
+_INFRA_FAILURE_PATTERNS = (
+    "HTTP 401",
+    "HTTP 503",
+    "timed out",
+    "engine is currently busy",
+    "Connection refused",
+    "Connection failed",
+    "could not reach",
+)
+
+
+def _is_infra_failure(reason: str) -> bool:
+    """True when the failure reason indicates an infrastructure issue, not a quality issue."""
+    r = reason or ""
+    return any(pat in r for pat in _INFRA_FAILURE_PATTERNS)
+
+
 # --- categorize regressions --------------------------------------------------
 
-def _categorize(r):
-    """Categorize a regression row by root cause pattern.
+def _categorize(reason: str) -> tuple[str, str, str, str]:
+    """Categorize a regression by root cause pattern from the failure reason.
 
-    Matches on failure reason text from the beta (side2) response. Categories
-    are generic infrastructure / agent-behaviour patterns, not tied to specific
-    eval suites or product names.
+    Returns (key, title, color, description).
     """
-    r2_lower = (r.reason2 or "").lower()
-    if "502" in r2_lower or "http 502" in r2_lower:
+    r_lower = (reason or "").lower()
+    if "502" in r_lower or "http 502" in r_lower:
         return ("infra-502", "Infrastructure: HTTP 502", "amber",
-                "The beta agent API returned 502 Bad Gateway during the eval run. "
+                "The agent API returned 502 Bad Gateway during the eval run. "
                 "These are transient infrastructure failures, not agent bugs. The cases "
                 "scored 0.0 because the agent never responded.")
-    if "timed out" in r2_lower and "request" in r2_lower:
+    if "timed out" in r_lower and "request" in r_lower:
         return ("infra-timeout", "Infrastructure: Request timeout (connection failure)", "amber",
-                "The request to the beta agent API timed out or the connection failed. "
+                "The request to the agent API timed out or the connection failed. "
                 "These are transient infrastructure failures, not agent bugs.")
-    if "connection failed" in r2_lower or "could not reach" in r2_lower:
+    if "connection failed" in r_lower or "could not reach" in r_lower:
         return ("infra-timeout", "Infrastructure: Request timeout (connection failure)", "amber",
-                "The request to the beta agent API timed out or the connection failed. "
+                "The request to the agent API timed out or the connection failed. "
                 "These are transient infrastructure failures, not agent bugs.")
-    if "duration" in r2_lower and "exceeded" in r2_lower:
+    if "duration" in r_lower and "exceeded" in r_lower:
         return ("timeout", "Performance: Eval timeout (max_duration_seconds exceeded)", "amber",
-                "The beta agent is slower, exceeding max_duration_seconds. "
+                "The agent is slower, exceeding max_duration_seconds. "
                 "The answers are often correct \u2014 only the timeout check fails.")
-    if "input-required" in r2_lower and "completed" in r2_lower:
+    if "input-required" in r_lower and "completed" in r_lower:
         return ("premature-completion", "Agent bug: Premature task completion", "red",
                 "The agent completed the task instead of staying in input-required state. "
                 "This may indicate a change in the orchestrator's completion signalling.")
-    if "forbidden phrase" in r2_lower:
+    if "forbidden phrase" in r_lower:
         return ("citation-leak", "Agent bug: Citation markers leaking as forbidden phrases", "red",
                 "Internal citation markers appear in the agent's output and match the "
                 "eval's forbidden-phrase checks.")
-    if "no data parts" in r2_lower:
+    if "no data parts" in r_lower:
         return ("no-data-parts", "Agent bug: Response missing data parts", "red",
                 "The agent's response has no data parts to evaluate. The response may "
                 "be text-only where structured data parts were expected.")
-    if "429" in r2_lower:
+    if "429" in r_lower:
         return ("rate-limited", "External: API rate-limiting (429)", "amber",
                 "An external API returned HTTP 429 (rate limited). The agent gave up "
                 "instead of using the results it already had.")
-    if "fabricated" in r2_lower or "not present in retrieved sources" in r2_lower:
+    if "fabricated" in r_lower or "not present in retrieved sources" in r_lower:
         return ("fabrication", "Agent bug: Fabricated citations", "red",
                 "The agent cites sources not present in the retrieved results.")
-    if "judge returned empty" in r2_lower:
+    if "judge returned empty" in r_lower:
         return ("judge-empty", "Eval infra: Judge returned empty content", "amber",
                 "The LLM judge returned empty content after 3 attempts. This is a judge "
                 "infrastructure issue, not an agent bug or eval correctness issue.")
-    if "missing required phrase" in r2_lower or "no match for required pattern" in r2_lower:
+    if "missing required phrase" in r_lower or "no match for required pattern" in r_lower:
         return ("clinical-content", "Agent bug: Missing expected content", "red",
                 "The agent's response is missing key terms that the eval expects. "
                 "This could be a real content regression or an eval brittleness issue.")
@@ -141,84 +174,122 @@ def _categorize(r):
 
 # --- build comparison data ---------------------------------------------------
 
-def build_comparison(source: DataSource, exps1: dict[str, SimpleNamespace], exps2: dict[str, SimpleNamespace], score: str = "overall"):
-    matched_names = sorted(set(exps1) & set(exps2))
-    rows = []
-    suite_summaries = []
+def build_comparison(
+    source: DataSource,
+    sides: list[dict[str, SimpleNamespace]],
+    score: str = "overall",
+    baseline_idx: int = 0,
+) -> tuple[list[SimpleNamespace], list[SimpleNamespace], list[set[str]]]:
+    """Build comparison rows across N sides.
+
+    Returns (rows, suite_summaries, only_sets) where:
+    - rows: per-case rows with scores from every side
+    - suite_summaries: per-suite aggregate stats
+    - only_sets: list of sets of suite names only present in that side
+    """
+    n = len(sides)
+    matched_names = sorted(set.intersection(*(set(s) for s in sides)))
+
+    rows: list[SimpleNamespace] = []
+    suite_summaries: list[SimpleNamespace] = []
 
     for exp_name in matched_names:
-        e1 = exps1[exp_name]
-        e2 = exps2[exp_name]
-        items1 = source.get_items(e1)
-        items2 = source.get_items(e2)
-        by_name1 = {source.case_name(it): it for it in items1}
-        by_name2 = {source.case_name(it): it for it in items2}
+        exps = [s[exp_name] for s in sides]
+        items = [source.get_items(e) for e in exps]
+        by_names = [{source.case_name(it): it for it in its} for its in items]
 
-        suite_cases = []
-        credits1_total = 0.0
-        credits2_total = 0.0
-        duration1_total = 0.0
-        duration2_total = 0.0
+        all_case_names = sorted(set.union(*(set(bn) for bn in by_names)))
 
-        for case_name in sorted(set(by_name1) | set(by_name2)):
-            it1 = by_name1.get(case_name)
-            it2 = by_name2.get(case_name)
-            sm1 = source.score_map(it1) if it1 else {}
-            sm2 = source.score_map(it2) if it2 else {}
+        suite_cases: list[SimpleNamespace] = []
+        credits_totals = [0.0] * n
+        duration_totals = [0.0] * n
 
-            if score not in sm1 and score not in sm2:
+        for case_name in all_case_names:
+            its = [bn.get(case_name) for bn in by_names]
+            sms = [source.score_map(it) if it else {} for it in its]
+
+            if not any(score in sm for sm in sms):
                 continue
 
-            v1, r1 = sm1.get(score, (None, ""))
-            v2, r2 = sm2.get(score, (None, ""))
-            delta = (v2 - v1) if v1 is not None and v2 is not None else None
+            vals = []
+            reasons = []
+            traces = []
+            all_scores_list = []
 
-            c1 = _credits(it1) if it1 else 0.0
-            c2 = _credits(it2) if it2 else 0.0
-            credits1_total += c1
-            credits2_total += c2
+            for i, it in enumerate(its):
+                sm = sms[i]
+                v, r = sm.get(score, (None, ""))
+                is_infra = v is not None and v == 0.0 and _is_infra_failure(r)
+                if is_infra:
+                    v = None
+                vals.append(v)
+                reasons.append(r)
+                traces.append(source.trace_url(it) if it else None)
+                all_scores_list.append(
+                    {k: (None if is_infra else v2[0]) for k, v2 in sm.items()}
+                )
+                credits_totals[i] += _credits(it) if it else 0.0
+                duration_totals[i] += _duration(it) if it else 0.0
 
-            d1 = _duration(it1) if it1 else 0.0
-            d2 = _duration(it2) if it2 else 0.0
-            duration1_total += d1
-            duration2_total += d2
-
-            all_scores1 = {k: v[0] for k, v in sm1.items()}
-            all_scores2 = {k: v[0] for k, v in sm2.items()}
+            if not any(v is not None for v in vals):
+                continue
 
             row = SimpleNamespace(
-                exp_name=exp_name, exp_id1=e1.id, exp_id2=e2.id,
-                case_name=case_name, v1=v1, v2=v2, delta=delta,
-                reason1=r1, reason2=r2,
-                trace1=source.trace_url(it1) if it1 else None,
-                trace2=source.trace_url(it2) if it2 else None,
-                credits1=c1, credits2=c2,
-                duration1=d1, duration2=d2,
-                all_scores1=all_scores1, all_scores2=all_scores2,
+                exp_name=exp_name,
+                case_name=case_name,
+                vals=vals,
+                reasons=reasons,
+                traces=traces,
+                all_scores_list=all_scores_list,
+                credits=[_credits(it) if it else 0.0 for it in its],
+                durations=[_duration(it) if it else 0.0 for it in its],
+                exp_ids=[e.id for e in exps],
             )
             rows.append(row)
             suite_cases.append(row)
 
-        scored = [r for r in suite_cases if r.delta is not None]
+        scored = [r for r in suite_cases if all(v is not None for v in r.vals)]
         if scored:
-            mean1 = sum(r.v1 for r in scored) / len(scored)
-            mean2 = sum(r.v2 for r in scored) / len(scored)
-            regressed = sum(1 for r in scored if r.delta < 0)
-            improved = sum(1 for r in scored if r.delta > 0)
-            unchanged = sum(1 for r in scored if r.delta == 0)
+            means = [sum(r.vals[i] for r in scored) / len(scored) for i in range(n)]
+            regressed = 0
+            improved = 0
+            unchanged = 0
+            for r in scored:
+                bl_val = r.vals[baseline_idx]
+                any_worse = any(
+                    r.vals[i] < bl_val - 0.001
+                    for i in range(n) if i != baseline_idx and r.vals[i] is not None
+                )
+                any_better = any(
+                    r.vals[i] > bl_val + 0.001
+                    for i in range(n) if i != baseline_idx and r.vals[i] is not None
+                )
+                if any_worse:
+                    regressed += 1
+                elif any_better:
+                    improved += 1
+                else:
+                    unchanged += 1
             suite_summaries.append(SimpleNamespace(
-                name=exp_name, mean1=mean1, mean2=mean2,
-                delta=mean2 - mean1, n=len(scored),
-                regressed=regressed, improved=improved, unchanged=unchanged,
-                credits1=credits1_total, credits2=credits2_total,
-                duration1=duration1_total, duration2=duration2_total,
-                exp_id1=e1.id, exp_id2=e2.id,
+                name=exp_name,
+                means=means,
+                n=len(scored),
+                credits=credits_totals,
+                durations=duration_totals,
+                exp_ids=[e.id for e in exps],
+                regressed=regressed,
+                improved=improved,
+                unchanged=unchanged,
             ))
 
-    return rows, suite_summaries, set(exps1) - set(exps2), set(exps2) - set(exps1)
+    only_sets = [
+        set(sides[i]) - set.union(*(set(sides[j]) for j in range(n) if j != i))
+        for i in range(n)
+    ]
+    return rows, suite_summaries, only_sets
 
 
-# --- HTML generation ---------------------------------------------------------
+# --- HTML helpers ------------------------------------------------------------
 
 def _esc(text):
     return html.escape(str(text)) if text is not None else ""
@@ -262,6 +333,75 @@ def _fmt_duration(seconds):
     return f"{int(h)}h{int(m)}m"
 
 
+def _slug(text):
+    return text.replace(" ", "-").replace("/", "-").replace(".", "-").lower()
+
+
+def _worst_delta(r, baseline_idx):
+    """Most negative non-baseline delta (or None)."""
+    bl = r.vals[baseline_idx]
+    deltas = [
+        r.vals[i] - bl
+        for i in range(len(r.vals))
+        if i != baseline_idx and r.vals[i] is not None and bl is not None
+    ]
+    return min(deltas) if deltas else None
+
+
+def _best_delta(r, baseline_idx):
+    """Most positive non-baseline delta (or None)."""
+    bl = r.vals[baseline_idx]
+    deltas = [
+        r.vals[i] - bl
+        for i in range(len(r.vals))
+        if i != baseline_idx and r.vals[i] is not None and bl is not None
+    ]
+    return max(deltas) if deltas else None
+
+
+def _worst_run_reason(r, baseline_idx):
+    """Reason from the worst-scoring non-baseline run."""
+    bl = r.vals[baseline_idx]
+    worst_i = None
+    worst_val = None
+    for i in range(len(r.vals)):
+        if i != baseline_idx and r.vals[i] is not None and bl is not None:
+            if worst_val is None or r.vals[i] < worst_val:
+                worst_val = r.vals[i]
+                worst_i = i
+    return r.reasons[worst_i] if worst_i is not None else ""
+
+
+def _is_regression(r, baseline_idx):
+    """True if any non-baseline run is worse than baseline."""
+    bl = r.vals[baseline_idx]
+    if bl is None:
+        return False
+    return any(
+        r.vals[i] is not None and r.vals[i] < bl - 0.001
+        for i in range(len(r.vals)) if i != baseline_idx
+    )
+
+
+def _is_improvement(r, baseline_idx):
+    """True if any non-baseline run is better than baseline (and none worse)."""
+    bl = r.vals[baseline_idx]
+    if bl is None:
+        return False
+    any_worse = any(
+        r.vals[i] is not None and r.vals[i] < bl - 0.001
+        for i in range(len(r.vals)) if i != baseline_idx
+    )
+    if any_worse:
+        return False
+    return any(
+        r.vals[i] is not None and r.vals[i] > bl + 0.001
+        for i in range(len(r.vals)) if i != baseline_idx
+    )
+
+
+# --- HTML head (CSS + JS) ----------------------------------------------------
+
 _HTML_HEAD = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -286,7 +426,7 @@ _HTML_HEAD = """\
   --code-bg: #0d1117; --link: #64b5f6;
   --callout-r: #3a1a1a; --callout-a: #3a3520; --callout-g: #1a3a1a;
 }
-body { font-family: -apple-system, system-ui, sans-serif; max-width: 920px;
+body { font-family: -apple-system, system-ui, sans-serif; max-width: 1100px;
        margin: 3rem auto; padding: 0 1rem; line-height: 1.5;
        background: var(--bg); color: var(--text); }
 h1 { font-size: 1.4rem; }
@@ -297,7 +437,9 @@ h3 { font-size: 0.95rem; margin: 0.5rem 0; }
 .num { font-weight: 600; font-size: 0.95rem; }
 .num.red { color: var(--red); } .num.green { color: var(--green); } .num.neutral { color: var(--neutral); }
 .summary-line { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: baseline; margin-top: 0.5rem; }
-.trend-bar { display: flex; height: 8px; margin: 0.5rem 0; border-radius: 4px; overflow: hidden; }
+.trend-bar-group { display: flex; align-items: center; gap: 0.5rem; margin: 0.3rem 0; }
+.trend-bar-label { font-size: 0.8rem; color: var(--faint); white-space: nowrap; min-width: 100px; }
+.trend-bar { flex: 1; display: flex; height: 8px; border-radius: 4px; overflow: hidden; }
 .trend-regressed { background: var(--trend-r); }
 .trend-improved { background: var(--trend-i); }
 .trend-unchanged { background: var(--trend-u); }
@@ -317,14 +459,12 @@ details[open] > summary::before { content: "\\25be "; }
 .badge.green { background: var(--badge-g); color: var(--green); }
 .badge.neutral { background: var(--badge-n); color: var(--neutral); }
 .badge.amber { background: var(--badge-a); color: var(--amber); }
-.suite-regressed { border-left: 3px solid var(--red); }
-.suite-improved { border-left: 3px solid var(--green); }
-.suite-unchanged { border-left: 3px solid var(--neutral); }
+.badge.best { background: var(--badge-g); color: var(--green); border: 1px solid var(--green); }
 .case-card { margin-left: 1rem; border: 1px solid var(--border); }
 .case-detail { padding: 0.5rem 0; }
-.scores-table, .cost-table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.3rem 0; }
-.scores-table th, .cost-table th { text-align: left; padding: 0.2rem 0.4rem; border-bottom: 1px solid var(--border); color: var(--faint); font-weight: 500; }
-.scores-table td, .cost-table td { padding: 0.2rem 0.4rem; }
+.scores-table, .cost-table, .multi-table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.3rem 0; }
+.scores-table th, .cost-table th, .multi-table th { text-align: left; padding: 0.2rem 0.4rem; border-bottom: 1px solid var(--border); color: var(--faint); font-weight: 500; }
+.scores-table td, .cost-table td, .multi-table td { padding: 0.2rem 0.4rem; }
 .num-cell { text-align: right; font-family: monospace; }
 .totals { font-weight: 600; border-top: 2px solid var(--border); }
 .reasons { margin: 0.3rem 0; }
@@ -347,9 +487,9 @@ details[open] > summary::before { content: "\\25be "; }
 .theme-toggle { position: fixed; top: 1rem; right: 1rem; cursor: pointer;
                  background: var(--card); border: 1px solid var(--border);
                  padding: 0.3rem 0.6rem; border-radius: 4px; font-size: 1rem; z-index: 100; }
-.beta-context { font-size: 0.85rem; }
-.beta-context ul { margin: 0.3rem 0; padding-left: 1.2rem; }
-.beta-context li { margin: 0.1rem 0; }
+.run-diff { font-size: 0.85rem; }
+.run-diff ul { margin: 0.3rem 0; padding-left: 1.2rem; }
+.run-diff li { margin: 0.1rem 0; }
 .insights { padding: 0.8rem 0; font-size: 0.92rem; }
 .insights p { margin: 0.6rem 0; line-height: 1.65; }
 .insights ul { margin: 0.4rem 0 0.6rem 1.2rem; padding-left: 0; }
@@ -359,11 +499,40 @@ details[open] > summary::before { content: "\\25be "; }
 .insights strong { font-weight: 600; }
 .insights code { background: var(--code-bg); padding: 0.1rem 0.25rem; border-radius: 3px; font-size: 0.82rem; }
 .insights .red { color: var(--red); } .insights .amber { color: var(--amber); } .insights .green { color: var(--green); }
+.suite-regressed { border-left: 3px solid var(--red); }
+.suite-improved { border-left: 3px solid var(--green); }
+.suite-unchanged { border-left: 3px solid var(--neutral); }
 details:target { scroll-margin-top: 1rem; }
 details:target > summary { font-weight: 700; }
 a[href^="#"] { color: var(--link); text-decoration: none; }
 a[href^="#"]:hover { text-decoration: underline; }
+.rank-table { border-collapse: collapse; width: 100%; font-size: 0.9rem; margin: 0.5rem 0; }
+.rank-table th, .rank-table td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border); }
+.rank-table .rank-1 { background: var(--badge-g); }
+.rank-table .rank-2 { background: var(--badge-n); }
+.rank-table .rank-3 { background: var(--badge-r); }
+.tab-bar { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin: 1rem 0 0.5rem; }
+.tab-bar input[type="radio"] { display: none; }
+.tab-bar label { padding: 0.4rem 1rem; cursor: pointer; border: 1px solid var(--border);
+  border-bottom: none; border-radius: 4px 4px 0 0; font-size: 0.85rem; font-weight: 500;
+  color: var(--faint); background: var(--card); margin-bottom: -2px; }
+.tab-bar input[type="radio"]:checked + label { color: var(--text); border-color: var(--border);
+  border-bottom: 2px solid var(--bg); font-weight: 700; }
+.tab-bar label:hover { color: var(--text); }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+.sortable { cursor: pointer; user-select: none; }
+.sortable:hover { color: var(--text); }
+.sortable::after { content: ""; font-size: 0.75rem; margin-left: 0.2rem; opacity: 0.4; }
+.sortable.sort-asc::after { content: " \\25b2"; opacity: 1; }
+.sortable.sort-desc::after { content: " \\25bc"; opacity: 1; }
 </style>
+<noscript><style>
+.tab-panel { display: block; }
+.tab-bar { display: none; }
+.controls { display: none; }
+#filter-toggle { display: none; }
+</style></noscript>
 </head>
 <body>
 <button class="theme-toggle" onclick="toggleTheme()"></button>
@@ -381,6 +550,126 @@ function toggleTheme() {
 function toggleAll(open) {
   document.querySelectorAll("details").forEach(function(d) { d.open = open; });
 }
+function switchTab(name) {
+  document.querySelectorAll(".tab-panel").forEach(function(p) { p.classList.remove("active"); });
+  document.querySelectorAll(".tab-bar label").forEach(function(l) { l.style.color = ""; l.style.fontWeight = ""; });
+  document.getElementById("tab-" + name).classList.add("active");
+  var label = document.querySelector('label[for="rt-' + name + '"]');
+  if (label) { label.style.color = "var(--text)"; label.style.fontWeight = "700"; }
+  updateSortIndicators(name);
+  applySort();
+}
+var currentSort = {col: 0, asc: false, tab: "deltas"};
+function sortSuites(col) {
+  var tab = currentTab();
+  if (currentSort.tab === tab && currentSort.col === col) {
+    currentSort.asc = !currentSort.asc;
+  } else {
+    currentSort.col = col;
+    currentSort.asc = false;
+    currentSort.tab = tab;
+  }
+  updateSortIndicators(tab);
+  applySort();
+}
+function currentTab() {
+  var a = document.querySelector(".tab-panel.active");
+  return a ? a.id.replace("tab-", "") : "deltas";
+}
+function updateSortIndicators(tab) {
+  document.querySelectorAll(".sortable").forEach(function(th) {
+    th.classList.remove("sort-asc", "sort-desc");
+  });
+  document.querySelectorAll('#tab-' + tab + ' th[data-col="' + currentSort.col + '"]').forEach(function(th) {
+    th.classList.add(currentSort.asc ? "sort-asc" : "sort-desc");
+  });
+}
+function applySort() {
+  var col = currentSort.col, asc = currentSort.asc, sortTab = currentSort.tab;
+  var attr = "data-sort-" + sortTab + "-" + col;
+  ["deltas", "credits", "time", "cases"].forEach(function(tabName) {
+    var panel = document.getElementById("tab-" + tabName);
+    if (!panel) return;
+    var containers = panel.querySelectorAll("table.multi-table tbody, table.cost-table tbody, .cases-container");
+    containers.forEach(function(container) {
+      var rows = Array.from(container.children).filter(function(r) {
+        return r.tagName === "TR" || r.tagName === "DETAILS";
+      });
+      var totals = rows.filter(function(r) { return r.classList.contains("totals"); });
+      var dataRows = rows.filter(function(r) { return !r.classList.contains("totals"); });
+      dataRows.sort(function(a, b) {
+        var av = a.getAttribute(attr);
+        var bv = b.getAttribute(attr);
+        if (av === null) return 1;
+        if (bv === null) return -1;
+        var an = parseFloat(av), bn = parseFloat(bv);
+        if (isNaN(an) && isNaN(bn)) return asc ? a.textContent.localeCompare(b.textContent) : b.textContent.localeCompare(a.textContent);
+        if (isNaN(an)) return 1;
+        if (isNaN(bn)) return -1;
+        return asc ? an - bn : bn - an;
+      });
+      dataRows.forEach(function(r) { container.appendChild(r); });
+      totals.forEach(function(r) { container.appendChild(r); });
+    });
+  });
+}
+(function() { sortSuites(0); })();
+
+function openAnchorTarget(id) {
+  var el = document.getElementById(id);
+  if (!el) return false;
+  if (el.tagName === "DETAILS") el.open = true;
+  var parent = el.parentElement;
+  while (parent) {
+    if (parent.tagName === "DETAILS") parent.open = true;
+    parent = parent.parentElement;
+  }
+  var panel = el.closest(".tab-panel");
+  if (panel) {
+    var tabName = panel.id.replace("tab-", "");
+    switchTab(tabName);
+  }
+  el.scrollIntoView({behavior: "smooth", block: "start"});
+  return true;
+}
+
+document.addEventListener("click", function(e) {
+  var a = e.target.closest("a[href^='#']");
+  if (!a) return;
+  var id = a.getAttribute("href").slice(1);
+  if (!id) return;
+  if (openAnchorTarget(id)) {
+    e.preventDefault();
+    history.replaceState(null, "", "#" + id);
+  }
+});
+
+window.addEventListener("hashchange", function() {
+  var id = location.hash.slice(1);
+  if (id) openAnchorTarget(id);
+});
+
+if (location.hash) {
+  var id = location.hash.slice(1);
+  if (id) setTimeout(function() { openAnchorTarget(id); }, 100);
+}
+
+function toggleFullScoreFilter() {
+  var cb = document.getElementById("filter-fullscore");
+  var filtered = cb.checked;
+  document.querySelectorAll(".view-all").forEach(function(el) { el.style.display = filtered ? "none" : ""; });
+  document.querySelectorAll(".view-filtered").forEach(function(el) { el.style.display = filtered ? "" : "none"; });
+  var cases = document.querySelectorAll("#tab-cases .case-card");
+  cases.forEach(function(c) {
+    c.style.display = (filtered && !c.classList.contains("fullscore")) ? "none" : "";
+  });
+  var suites = document.querySelectorAll("#tab-cases .cases-container > details");
+  suites.forEach(function(s) {
+    var visible = Array.from(s.querySelectorAll(".case-card")).filter(function(c) { return c.style.display !== "none"; });
+    s.style.display = visible.length > 0 ? "" : "none";
+  });
+  applySort();
+}
 </script>
 """
 
@@ -390,124 +679,330 @@ _HTML_TAIL = """\
 """
 
 
-def generate_html(rows, suite_summaries, only1, only2, tags1, tags2, label1, label2, score, insights_html="", beta_context_html=""):
-    scored = [r for r in rows if r.delta is not None]
-    mean1 = sum(r.v1 for r in scored) / len(scored) if scored else 0
-    mean2 = sum(r.v2 for r in scored) / len(scored) if scored else 0
-    regressed = sum(1 for r in scored if r.delta < 0)
-    improved = sum(1 for r in scored if r.delta > 0)
-    unchanged = sum(1 for r in scored if r.delta == 0)
+# --- case card renderer ------------------------------------------------------
+
+def _render_case_card(parts, r, labels, baseline_idx, case_id, badge_delta=None, suite_name=None):
+    """Render a case card showing all N runs."""
+    n = len(labels)
+
+    if badge_delta is not None:
+        badge_cls = _delta_color(badge_delta)
+        badge_html = f'<span class="badge {badge_cls}">{_fmt_delta(badge_delta)}</span>'
+    else:
+        badge_html = '<span class="badge neutral">\u2014</span>'
+
+    summary_text = badge_html + f' {_esc(r.case_name)}'
+    if suite_name:
+        summary_text += f' <span class="meta">({_esc(suite_name)})</span>'
+
+    parts.append(f'<details class="case-card" id="{case_id}">')
+    parts.append(f'<summary>{summary_text}</summary>')
+    parts.append('<div class="case-detail">')
+
+    all_score_names = sorted(set().union(*(set(sl) for sl in r.all_scores_list)))
+    if all_score_names:
+        parts.append('<table class="scores-table"><thead><tr><th>Score</th>')
+        for i in range(n):
+            parts.append(f'<th>{_esc(labels[i])}</th>')
+        parts.append('</tr></thead><tbody>')
+        for sn in all_score_names:
+            parts.append(f'<tr><td>{_esc(sn)}</td>')
+            for i in range(n):
+                sv = r.all_scores_list[i].get(sn) if i < len(r.all_scores_list) else None
+                parts.append(f'<td class="num-cell">{_fmt_score(sv)}</td>')
+            parts.append('</tr>')
+        parts.append('</tbody></table>')
+
+    credits_str = " / ".join(f"{r.credits[i]:.4f}" for i in range(n))
+    time_str = " / ".join(_fmt_duration(r.durations[i]) for i in range(n))
+    parts.append(f'<p class="meta">Credits: {credits_str} \u00b7 Time: {time_str}</p>')
+
+    has_reasons = any(r.reasons[i] for i in range(n))
+    if has_reasons:
+        parts.append('<div class="reasons">')
+        for i in range(n):
+            if r.reasons[i]:
+                parts.append(f'<p><strong>{_esc(labels[i])}:</strong> <code>{_esc(r.reasons[i][:500])}</code></p>')
+        parts.append('</div>')
+
+    has_traces = any(r.traces[i] for i in range(n))
+    if has_traces:
+        parts.append('<div class="trace-links">')
+        for i in range(n):
+            if r.traces[i]:
+                parts.append(f'<a href="{_esc(r.traces[i])}" target="_blank" class="trace-link">Trace ({_esc(labels[i])}) \u2197</a>')
+        parts.append('</div>')
+
+    parts.append('<div class="cmds">')
+    for i in range(n):
+        if r.exp_ids[i]:
+            parts.append(f'<code>uv run python -m agent_evals.scripts.inspect_eval --exp {r.exp_ids[i]} --case "{_esc(r.case_name)}"</code><br>')
+            parts.append(f'<code>uv run python -m agent_evals.scripts.fetch_traces --exp {r.exp_ids[i]} --case "{_esc(r.case_name)}"</code>')
+            if i < n - 1:
+                parts.append('<br>')
+    parts.append('</div>')
+
+    parts.append('</div></details>')
+
+
+# --- main HTML renderer ------------------------------------------------------
+
+def generate_report_html(
+    rows: list[SimpleNamespace],
+    suite_summaries: list[SimpleNamespace],
+    only_sets: list[set[str]],
+    labels: list[str],
+    tags_list: list[list[str]],
+    score: str,
+    baseline_idx: int,
+    insights_html: str = "",
+    run_differences_list: list[str] | None = None,
+) -> str:
+    n = len(labels)
+    bl = baseline_idx
+    if run_differences_list is None:
+        run_differences_list = [""] * n
+
+    # --- Compute aggregates for ALL rows (per-model means over their full support) ---
+    support_counts = [sum(1 for r in rows if r.vals[i] is not None) for i in range(n)]
+    all_means = []
+    for i in range(n):
+        vals = [r.vals[i] for r in rows if r.vals[i] is not None]
+        all_means.append(sum(vals) / len(vals) if vals else 0)
+
+    # --- Compute aggregates for FULLY-SCORED rows only (fair comparison) ---
+    scored = [r for r in rows if all(v is not None for v in r.vals)]
     total = len(scored)
+    total_cases = len(rows)
+    overall_means = []
+    for i in range(n):
+        vals = [r.vals[i] for r in scored]
+        overall_means.append(sum(vals) / len(vals) if vals else 0)
 
-    total_credits1 = sum(s.credits1 for s in suite_summaries)
-    total_credits2 = sum(s.credits2 for s in suite_summaries)
-    total_duration1 = sum(s.duration1 for s in suite_summaries)
-    total_duration2 = sum(s.duration2 for s in suite_summaries)
+    # Regression/improvement/unchanged counts (fully-scored)
+    regressed_count = 0
+    improved_count = 0
+    unchanged_count = 0
+    for r in scored:
+        if _is_regression(r, bl):
+            regressed_count += 1
+        elif _is_improvement(r, bl):
+            improved_count += 1
+        else:
+            unchanged_count += 1
 
-    # Separate 502 failures for cost analysis
-    infra_502_rows = [r for r in rows if r.delta is not None and r.delta < -0.001
-                       and "502" in (r.reason2 or "").lower()]
-    infra_502_credits = sum(r.credits2 for r in infra_502_rows)
-    valid_credits1 = total_credits1
-    valid_credits2 = total_credits2 - infra_502_credits  # 502 failures cost ~0
+    total_credits = [sum(r.credits[i] for r in rows) for i in range(n)]
+    total_durations = [sum(r.durations[i] for r in rows) for i in range(n)]
 
-    # Group rows by suite
-    by_suite = defaultdict(list)
+    # Win counts (fully-scored)
+    win_counts = [0] * n
+    tie_count = 0
+    for r in scored:
+        max_val = max(r.vals)
+        winners = [i for i, v in enumerate(r.vals) if v == max_val and v is not None]
+        if len(winners) == 1:
+            win_counts[winners[0]] += 1
+        elif len(winners) > 1:
+            tie_count += 1
+
+    # --- Per-suite filtered summaries (fully-scored only) ---
+    by_suite_filtered: dict[str, list[SimpleNamespace]] = defaultdict(list)
+    for r in scored:
+        by_suite_filtered[r.exp_name].append(r)
+    filtered_suite_summaries: list[SimpleNamespace] = []
+    for exp_name, suite_rows in by_suite_filtered.items():
+        f_means = [sum(r.vals[i] for r in suite_rows) / len(suite_rows) for i in range(n)]
+        f_credits = [sum(r.credits[i] for r in suite_rows) for i in range(n)]
+        f_durations = [sum(r.durations[i] for r in suite_rows) for i in range(n)]
+        f_reg = sum(1 for r in suite_rows if _is_regression(r, bl))
+        f_imp = sum(1 for r in suite_rows if _is_improvement(r, bl))
+        f_unch = len(suite_rows) - f_reg - f_imp
+        filtered_suite_summaries.append(SimpleNamespace(
+            name=exp_name, means=f_means, n=len(suite_rows),
+            credits=f_credits, durations=f_durations,
+            exp_ids=suite_rows[0].exp_ids,
+            regressed=f_reg, improved=f_imp, unchanged=f_unch,
+        ))
+    filtered_suite_summaries.sort(key=lambda s: s.name)
+
+    # --- Per-suite all summaries (each model over own support) ---
+    by_suite_all: dict[str, list[SimpleNamespace]] = defaultdict(list)
     for r in rows:
-        by_suite[r.exp_name].append(r)
+        by_suite_all[r.exp_name].append(r)
+    all_suite_summaries: list[SimpleNamespace] = []
+    for exp_name, suite_rows in by_suite_all.items():
+        a_means = []
+        a_credits = [0.0] * n
+        a_durations = [0.0] * n
+        for i in range(n):
+            vals_i = [r.vals[i] for r in suite_rows if r.vals[i] is not None]
+            a_means.append(sum(vals_i) / len(vals_i) if vals_i else 0)
+            a_credits[i] = sum(r.credits[i] for r in suite_rows)
+            a_durations[i] = sum(r.durations[i] for r in suite_rows)
+        f_scored = [r for r in suite_rows if all(v is not None for v in r.vals)]
+        a_reg = sum(1 for r in f_scored if _is_regression(r, bl))
+        a_imp = sum(1 for r in f_scored if _is_improvement(r, bl))
+        a_unch = len(f_scored) - a_reg - a_imp
+        all_suite_summaries.append(SimpleNamespace(
+            name=exp_name, means=a_means, n=len(suite_rows),
+            credits=a_credits, durations=a_durations,
+            exp_ids=suite_rows[0].exp_ids,
+            regressed=a_reg, improved=a_imp, unchanged=a_unch,
+        ))
+    all_suite_summaries.sort(key=lambda s: s.name)
 
-    # Categorize regressions
-    regression_rows = [r for r in rows if r.delta is not None and r.delta < -0.001]
-    categories = defaultdict(list)
-    for r in regression_rows:
-        cat_key, cat_title, cat_color, cat_desc = _categorize(r)
-        categories[cat_key] = (cat_title, cat_color, cat_desc, [])
+    f_total_credits = [sum(s.credits[i] for s in filtered_suite_summaries) for i in range(n)]
+    f_total_durations = [sum(s.durations[i] for s in filtered_suite_summaries) for i in range(n)]
 
-    for r in regression_rows:
-        cat_key, _, _, _ = _categorize(r)
-        categories[cat_key][3].append(r)
-
-    # Sort categories by count
-    sorted_cats = sorted(categories.items(), key=lambda x: -len(x[1][3]))
-
-    parts = []
+    # --- Build HTML ---
+    parts: list[str] = []
     parts.append(_HTML_HEAD)
 
     # Title
-    parts.append(f"<h1>Eval Report: {_esc(label2)} vs {_esc(label1)}</h1>")
+    if n == 2:
+        parts.append(f"<h1>Eval Report: {_esc(labels[1 - bl])} vs {_esc(labels[bl])}</h1>")
+    else:
+        parts.append(f"<h1>Eval Report: {n} runs compared</h1>")
     parts.append(f'<p class="meta">Score: <code>{_esc(score)}</code> \u00b7 '
-                 f"Compared {total} cases across {len(suite_summaries)} suites \u00b7 "
-                 f"Tags: <code>{_esc(' '.join(tags1))}</code> \u2192 <code>{_esc(' '.join(tags2))}</code></p>")
+                 f"Compared {total_cases} cases across {len(suite_summaries)} suites "
+                 f"({total} fully scored, {total_cases - total} with infra-failure gaps) \u00b7 "
+                 f"Baseline: <code>{_esc(labels[bl])}</code></p>")
 
-    # Summary line
+    # --- Summary line ---
     parts.append('<div class="summary-line">')
-    parts.append(f'<span class="num {"red" if mean2 < mean1 else "green"}">{mean1:.3f}</span> <span class="label">{_esc(label1)}</span>')
-    parts.append(f' \u00b7 <span class="num {"green" if mean2 > mean1 else "red"}">{mean2:.3f}</span> <span class="label">{_esc(label2)}</span>')
-    delta_mean = mean2 - mean1
-    parts.append(f' \u00b7 <span class="num {_delta_color(delta_mean)}">{_fmt_pp(delta_mean)}</span> <span class="label">delta</span>')
-    parts.append(f' \u00b7 <span class="num red">{regressed}</span> <span class="label">regressed</span>')
-    parts.append(f' \u00b7 <span class="num green">{improved}</span> <span class="label">improved</span>')
-    parts.append(f' \u00b7 <span class="num neutral">{unchanged}</span> <span class="label">unchanged</span>')
+    parts.append(f'<span class="num neutral">{overall_means[bl]:.3f}</span> <span class="label">{_esc(labels[bl])}</span>')
+    for i in range(n):
+        if i == bl:
+            continue
+        d = overall_means[i] - overall_means[bl]
+        parts.append(f' \u00b7 <span class="num {_delta_color(d)}">{overall_means[i]:.3f}</span> <span class="label">{_esc(labels[i])}</span> ({_fmt_pp(d)})')
+    parts.append(f' \u00b7 <span class="num red">{regressed_count}</span> <span class="label">regressed</span>')
+    parts.append(f' \u00b7 <span class="num green">{improved_count}</span> <span class="label">improved</span>')
+    parts.append(f' \u00b7 <span class="num neutral">{unchanged_count}</span> <span class="label">unchanged</span>')
     parts.append('</div>')
 
-    # Cost summary
+    # --- Cost summary ---
     parts.append('<div class="summary-line" style="margin-top:0.5rem">')
-    parts.append(f'<span class="label">Credits:</span> <span class="num">{total_credits1:.4f}</span> <span class="label">{_esc(label1)}</span>')
-    parts.append(f' \u00b7 <span class="num">{total_credits2:.4f}</span> <span class="label">{_esc(label2)}</span>')
-    credit_delta = total_credits2 - total_credits1
-    credit_pct = (credit_delta / total_credits1 * 100) if total_credits1 > 0 else 0
-    parts.append(f' \u00b7 <span class="num {_delta_color(-credit_delta)}">{credit_delta:+.4f} ({credit_pct:+.1f}%)</span>')
-    if infra_502_credits < 0.001 and len(infra_502_rows) > 0:
-        parts.append(f' <span class="label">({len(infra_502_rows)} cases failed with 502, ~0 credits)</span>')
+    parts.append(f'<span class="label">Credits:</span> <span class="num">{total_credits[bl]:.4f}</span> <span class="label">{_esc(labels[bl])}</span>')
+    for i in range(n):
+        if i == bl:
+            continue
+        cd = total_credits[i] - total_credits[bl]
+        parts.append(f' \u00b7 <span class="num">{total_credits[i]:.4f}</span> <span class="label">{_esc(labels[i])}</span> ({cd:+.4f})')
     parts.append('</div>')
 
-    # Time summary
+    # --- Time summary ---
     parts.append('<div class="summary-line" style="margin-top:0.5rem">')
-    parts.append(f'<span class="label">Time:</span> <span class="num">{_fmt_duration(total_duration1)}</span> <span class="label">{_esc(label1)}</span>')
-    parts.append(f' \u00b7 <span class="num">{_fmt_duration(total_duration2)}</span> <span class="label">{_esc(label2)}</span>')
-    duration_delta = total_duration2 - total_duration1
-    duration_pct = (duration_delta / total_duration1 * 100) if total_duration1 > 0 else 0
-    parts.append(f' \u00b7 <span class="num {_delta_color(-duration_delta)}">{_fmt_duration(abs(duration_delta))} ({duration_pct:+.1f}%)</span>')
+    parts.append(f'<span class="label">Time:</span> <span class="num">{_fmt_duration(total_durations[bl])}</span> <span class="label">{_esc(labels[bl])}</span>')
+    for i in range(n):
+        if i == bl:
+            continue
+        dd = total_durations[i] - total_durations[bl]
+        parts.append(f' \u00b7 <span class="num">{_fmt_duration(total_durations[i])}</span> <span class="label">{_esc(labels[i])}</span> ({_fmt_duration(abs(dd))})')
     parts.append('</div>')
 
-    # Trend bar
+    # --- Trend bars (one per non-baseline run) ---
     if total > 0:
-        r_pct = regressed / total * 100
-        i_pct = improved / total * 100
-        u_pct = unchanged / total * 100
-        parts.append(f'<div class="trend-bar"><div class="trend-regressed" style="width:{r_pct:.1f}%"></div>'
-                     f'<div class="trend-improved" style="width:{i_pct:.1f}%"></div>'
-                     f'<div class="trend-unchanged" style="width:{u_pct:.1f}%"></div></div>')
+        for i in range(n):
+            if i == bl:
+                continue
+            i_reg = sum(1 for r in scored if r.vals[i] is not None and r.vals[bl] is not None and r.vals[i] < r.vals[bl] - 0.001)
+            i_imp = sum(1 for r in scored if r.vals[i] is not None and r.vals[bl] is not None and r.vals[i] > r.vals[bl] + 0.001)
+            i_unch = total - i_reg - i_imp
+            r_pct = i_reg / total * 100
+            i_pct = i_imp / total * 100
+            u_pct = i_unch / total * 100
+            parts.append('<div class="trend-bar-group">')
+            parts.append(f'<span class="trend-bar-label">{_esc(labels[i])}</span>')
+            parts.append(f'<div class="trend-bar"><div class="trend-regressed" style="width:{r_pct:.1f}%"></div>'
+                         f'<div class="trend-improved" style="width:{i_pct:.1f}%"></div>'
+                         f'<div class="trend-unchanged" style="width:{u_pct:.1f}%"></div></div>')
+            parts.append('</div>')
 
-    # Controls
+    # --- Filter toggle ---
+    parts.append('<div id="filter-toggle" style="margin:0.5rem 0 1rem 0"><label class="meta" style="cursor:pointer">'
+                 '<input type="checkbox" id="filter-fullscore" onchange="toggleFullScoreFilter()" style="margin-right:0.3rem"/>'
+                 '<strong>Show only fully-scored cases</strong> (all runs have quality data \u2014 '
+                 f'{total} of {total_cases} cases)'
+                 '</label></div>')
+
+    # --- Controls ---
     parts.append('<div class="controls">')
     parts.append('<button class="btn" onclick="toggleAll(true)">Expand all</button> ')
     parts.append('<button class="btn" onclick="toggleAll(false)">Collapse all</button>')
     parts.append('</div>')
 
-    # Only-in sets
-    if only1:
-        parts.append(f'<p class="meta"><strong>Only in {_esc(label1)}:</strong> {", ".join(sorted(only1))}</p>')
-    if only2:
-        parts.append(f'<p class="meta"><strong>Only in {_esc(label2)}:</strong> {", ".join(sorted(only2))}</p>')
+    # --- Only-in sets ---
+    has_only = any(only_sets[i] for i in range(n))
+    if has_only:
+        parts.append('<details id="run-info"><summary class="meta">Run info</summary>')
+        for i in range(n):
+            if only_sets[i]:
+                parts.append(f'<p class="meta"><strong>Only in {_esc(labels[i])}:</strong> {", ".join(sorted(only_sets[i]))}</p>')
+        parts.append('</details>')
 
-    # Insights section (open by default, author-written)
+    # --- Insights ---
     if insights_html:
         parts.append('<details open id="insights">')
         parts.append('<summary><strong>Summary &amp; Insights</strong></summary>')
         parts.append(f'<div class="insights">{insights_html}</div>')
         parts.append('</details>')
 
-    # Beta context (optional, from --beta-context file)
-    if beta_context_html:
-        parts.append('<details open id="beta-context">')
-        parts.append(f'<summary><strong>Beta Changes Context</strong> <span class="meta">({_esc(label2)} = beta, {_esc(label1)} = baseline)</span></summary>')
-        parts.append(f'<div class="beta-context">{beta_context_html}</div>')
-        parts.append('</details>')
+    # --- Run differences ---
+    for i in range(n):
+        if i < len(run_differences_list) and run_differences_list[i]:
+            parts.append(f'<details open id="run-diff-{i}">')
+            parts.append(f'<summary><strong>Run Differences: {_esc(labels[i])}</strong></summary>')
+            parts.append(f'<div class="run-diff">{run_differences_list[i]}</div>')
+            parts.append('</details>')
 
-    # Root cause analysis
+    # --- Rankings table ---
+    def _rankings_table(means, credits, durations, cases_counts, case_total):
+        ranked = sorted(range(n), key=lambda i: -means[i])
+        p = ['<table class="rank-table"><thead><tr><th>Rank</th><th>Run</th><th>Mean Score</th><th>Cases</th><th>Credits</th><th>Time</th>'
+             f'<th title="Wins among {case_total} fully-scored cases (fair comparison only)">Wins</th>']
+        for i in range(n):
+            if i != bl:
+                p.append(f'<th>\u0394 vs {_esc(labels[i])}</th>')
+        p.append('</tr></thead><tbody>')
+        for rank, idx in enumerate(ranked, 1):
+            p.append(f'<tr class="rank-{rank}"><td>{rank}</td><td>{_esc(labels[idx])}</td>'
+                     f'<td class="num-cell">{means[idx]:.3f}</td>'
+                     f'<td class="num-cell">{cases_counts[idx]}/{case_total}</td>'
+                     f'<td class="num-cell">{credits[idx]:.4f}</td>'
+                     f'<td class="num-cell">{_fmt_duration(durations[idx])}</td>'
+                     f'<td class="num-cell" title="{win_counts[idx]} wins among {case_total} fully-scored cases">{win_counts[idx]}</td>')
+            for i in range(n):
+                if i != bl:
+                    d = means[idx] - means[i]
+                    p.append(f'<td class="num-cell {_delta_color(d)}">{_fmt_pp(d)}</td>')
+            p.append('</tr>')
+        p.append('</tbody></table>')
+        return "".join(p)
+
+    parts.append('<h2 id="rankings">Overall Rankings</h2>')
+    parts.append('<div class="view-all">')
+    parts.append(_rankings_table(all_means, total_credits, total_durations, support_counts, total_cases))
+    parts.append('</div>')
+    parts.append('<div class="view-filtered" style="display:none">')
+    f_support = [total] * n
+    parts.append(_rankings_table(overall_means, f_total_credits, f_total_durations, f_support, total))
+    parts.append('</div>')
+
+    # --- Root Cause Analysis ---
+    regression_rows = [r for r in rows if _is_regression(r, bl)]
+    categories: dict[str, tuple] = {}
+    for r in regression_rows:
+        reason = _worst_run_reason(r, bl)
+        cat_key, cat_title, cat_color, cat_desc = _categorize(reason)
+        if cat_key not in categories:
+            categories[cat_key] = (cat_title, cat_color, cat_desc, [])
+        categories[cat_key][3].append(r)
+
+    sorted_cats = sorted(categories.items(), key=lambda x: -len(x[1][3]))
+
     parts.append('<h2 id="root-cause-analysis">Root Cause Analysis</h2>')
-    parts.append(f'<p class="meta">{regressed} regressed cases grouped by pattern:</p>')
+    parts.append(f'<p class="meta">{len(regression_rows)} regressed cases grouped by pattern:</p>')
 
     for cat_key, (cat_title, cat_color, cat_desc, cat_rows) in sorted_cats:
         if not cat_rows:
@@ -517,214 +1012,288 @@ def generate_html(rows, suite_summaries, only1, only2, tags1, tags2, label1, lab
         parts.append(f'<summary><span class="badge {cat_color}">{len(cat_rows)}</span> {cat_title}</summary>')
         parts.append(f'<div class="callout {cat_color}">{cat_desc}</div>')
 
-        for r in cat_rows:
-            case_id = f"case-{cat_key}-{r.case_name}".replace(" ", "-").replace("/", "-").replace(".", "-").lower()
-            parts.append(f'<details class="case-card" id="{case_id}">')
-            parts.append(f'<summary><span class="badge {_delta_color(r.delta)}">{_fmt_delta(r.delta)}</span> '
-                         f'{_esc(r.case_name)} <span class="meta">({_esc(r.exp_name)})</span></summary>')
-            parts.append('<div class="case-detail">')
+        for r in sorted(cat_rows, key=lambda r: _worst_delta(r, bl) or 0):
+            case_id = f"case-{cat_key}-{_slug(r.case_name)}"
+            wd = _worst_delta(r, bl)
+            _render_case_card(parts, r, labels, bl, case_id, badge_delta=wd, suite_name=r.exp_name)
 
-            # Scores table
-            all_score_names = sorted(set(r.all_scores1) | set(r.all_scores2))
-            if all_score_names:
-                parts.append('<table class="scores-table"><thead><tr><th>Score</th>'
-                             f'<th>{_esc(label1)}</th><th>{_esc(label2)}</th><th>Delta</th></tr></thead><tbody>')
-                for sn in all_score_names:
-                    sv1 = r.all_scores1.get(sn)
-                    sv2 = r.all_scores2.get(sn)
-                    sd = (sv2 - sv1) if sv1 is not None and sv2 is not None else None
-                    parts.append(f'<tr><td>{_esc(sn)}</td>'
-                                 f'<td class="num-cell">{_fmt_score(sv1)}</td>'
-                                 f'<td class="num-cell">{_fmt_score(sv2)}</td>'
-                                 f'<td class="num-cell {_delta_color(sd)}">{_fmt_delta(sd)}</td></tr>')
-                parts.append('</tbody></table>')
+        parts.append('</details>')
 
-            # Credits + Duration
-            parts.append(f'<p class="meta">Credits: {r.credits1:.4f} \u2192 {r.credits2:.4f} \u00b7 Time: {_fmt_duration(r.duration1)} \u2192 {_fmt_duration(r.duration2)}</p>')
-
-            # Reasons
-            if r.reason1 or r.reason2:
-                parts.append('<div class="reasons">')
-                if r.reason1:
-                    parts.append(f'<p><strong>{_esc(label1)}:</strong> <code>{_esc(r.reason1[:500])}</code></p>')
-                if r.reason2:
-                    parts.append(f'<p><strong>{_esc(label2)}:</strong> <code>{_esc(r.reason2[:500])}</code></p>')
-                parts.append('</div>')
-
-            # Trace links
-            if r.trace1 or r.trace2:
-                parts.append('<div class="trace-links">')
-                if r.trace1:
-                    parts.append(f'<a href="{_esc(r.trace1)}" target="_blank" class="trace-link">Trace ({_esc(label1)}) \u2197</a>')
-                if r.trace2:
-                    parts.append(f'<a href="{_esc(r.trace2)}" target="_blank" class="trace-link">Trace ({_esc(label2)}) \u2197</a>')
-                parts.append('</div>')
-
-            # Inspect/fetch commands
-            parts.append('<div class="cmds">')
-            parts.append(f'<code>uv run python -m agent_evals.scripts.inspect_eval --exp {r.exp_id1} --case "{_esc(r.case_name)}"</code><br>')
-            parts.append(f'<code>uv run python -m agent_evals.scripts.inspect_eval --exp {r.exp_id2} --case "{_esc(r.case_name)}"</code><br>')
-            parts.append(f'<code>uv run python -m agent_evals.scripts.fetch_traces --exp {r.exp_id1} --case "{_esc(r.case_name)}"</code><br>')
-            parts.append(f'<code>uv run python -m agent_evals.scripts.fetch_traces --exp {r.exp_id2} --case "{_esc(r.case_name)}"</code>')
-            parts.append('</div>')
-
-            parts.append('</div>')  # case-detail
-            parts.append('</details>')  # case-card
-
-        parts.append('</details>')  # root-cause
-
-    # Improvements
-    improvement_rows = sorted([r for r in rows if r.delta is not None and r.delta > 0.001],
-                               key=lambda r: -r.delta)
+    # --- Improvements ---
+    improvement_rows = [r for r in rows if _is_improvement(r, bl)]
+    improvement_rows.sort(key=lambda r: _best_delta(r, bl) or 0, reverse=True)
     if improvement_rows:
         parts.append('<h2 id="improvements">Improvements</h2>')
         parts.append(f'<p class="meta">{len(improvement_rows)} cases improved:</p>')
         parts.append('<details class="root-cause" id="all-improvements"><summary><span class="badge green">'
-                       f'{len(improvement_rows)}</span> All improvements</summary>')
+                     f'{len(improvement_rows)}</span> All improvements</summary>')
         for r in improvement_rows:
-            imp_id = f"imp-{r.case_name}".replace(" ", "-").replace("/", "-").replace(".", "-").lower()
-            parts.append(f'<details class="case-card" id="{imp_id}">')
-            parts.append(f'<summary><span class="badge green">{_fmt_delta(r.delta)}</span> '
-                         f'{_esc(r.case_name)} <span class="meta">({_esc(r.exp_name)})</span></summary>')
-            parts.append('<div class="case-detail">')
-            if r.reason1:
-                parts.append(f'<p><strong>{_esc(label1)}:</strong> <code>{_esc(r.reason1[:400])}</code></p>')
-            if r.reason2:
-                parts.append(f'<p><strong>{_esc(label2)}:</strong> <code>{_esc(r.reason2[:400])}</code></p>')
-            if r.trace1:
-                parts.append(f'<a href="{_esc(r.trace1)}" target="_blank" class="trace-link">Trace ({_esc(label1)}) \u2197</a>')
-            if r.trace2:
-                parts.append(f'<a href="{_esc(r.trace2)}" target="_blank" class="trace-link">Trace ({_esc(label2)}) \u2197</a>')
-            parts.append(f'<p class="meta">Credits: {r.credits1:.4f} \u2192 {r.credits2:.4f} \u00b7 Time: {_fmt_duration(r.duration1)} \u2192 {_fmt_duration(r.duration2)}</p>')
-            parts.append('</div></details>')
+            imp_id = f"imp-{_slug(r.case_name)}"
+            bd = _best_delta(r, bl)
+            _render_case_card(parts, r, labels, bl, imp_id, badge_delta=bd, suite_name=r.exp_name)
         parts.append('</details>')
 
-    # Cost analysis section
-    parts.append('<h2 id="credit-usage">Credit Usage by Suite</h2>')
-    parts.append('<table class="cost-table"><thead><tr>'
-                 f'<th>Suite</th><th>{_esc(label1)} credits</th><th>{_esc(label2)} credits</th><th>Delta</th><th>% change</th>'
-                 '</tr></thead><tbody>')
-    for s in sorted(suite_summaries, key=lambda s: s.credits2 - s.credits1, reverse=True):
-        c_delta = s.credits2 - s.credits1
-        c_pct = (c_delta / s.credits1 * 100) if s.credits1 > 0 else 0
-        parts.append(f'<tr><td>{_esc(s.name)}</td>'
-                     f'<td class="num-cell">{s.credits1:.4f}</td>'
-                     f'<td class="num-cell">{s.credits2:.4f}</td>'
-                     f'<td class="num-cell {_delta_color(c_delta)}">{c_delta:+.4f}</td>'
-                     f'<td class="num-cell {_delta_color(c_delta)}">{c_pct:+.1f}%</td></tr>')
-    parts.append(f'<tr class="totals"><td>Total</td>'
-                 f'<td class="num-cell">{total_credits1:.4f}</td>'
-                 f'<td class="num-cell">{total_credits2:.4f}</td>'
-                 f'<td class="num-cell {_delta_color(total_credits2-total_credits1)}">{total_credits2-total_credits1:+.4f}</td>'
-                 f'<td class="num-cell {_delta_color(total_credits2-total_credits1)}">{(total_credits2-total_credits1)/total_credits1*100 if total_credits1>0 else 0:+.1f}%</td></tr>')
-    parts.append('</tbody></table>')
-
-    if len(infra_502_rows) > 0:
-        parts.append(f'<p class="meta">Note: {len(infra_502_rows)} cases failed with HTTP 502 '
-                       f'(infrastructure), consuming ~0 credits on {label2}. Excluding these, '
-                       f'the effective credit usage is {valid_credits1:.4f} \u2192 {valid_credits2:.4f}.</p>')
-
-    # Time usage table
-    parts.append('<h2 id="time-usage">Time Usage by Suite</h2>')
-    parts.append('<table class="cost-table"><thead><tr>'
-                 f'<th>Suite</th><th>{_esc(label1)} time</th><th>{_esc(label2)} time</th><th>Delta</th><th>% change</th>'
-                 '</tr></thead><tbody>')
-    for s in sorted(suite_summaries, key=lambda s: s.duration2 - s.duration1, reverse=True):
-        d_delta = s.duration2 - s.duration1
-        d_pct = (d_delta / s.duration1 * 100) if s.duration1 > 0 else 0
-        parts.append(f'<tr><td>{_esc(s.name)}</td>'
-                     f'<td class="num-cell">{_fmt_duration(s.duration1)}</td>'
-                     f'<td class="num-cell">{_fmt_duration(s.duration2)}</td>'
-                     f'<td class="num-cell {_delta_color(d_delta)}">{d_delta:+.1f}s</td>'
-                     f'<td class="num-cell {_delta_color(d_delta)}">{d_pct:+.1f}%</td></tr>')
-    parts.append(f'<tr class="totals"><td>Total</td>'
-                 f'<td class="num-cell">{_fmt_duration(total_duration1)}</td>'
-                 f'<td class="num-cell">{_fmt_duration(total_duration2)}</td>'
-                 f'<td class="num-cell {_delta_color(total_duration2-total_duration1)}">{total_duration2-total_duration1:+.1f}s</td>'
-                 f'<td class="num-cell {_delta_color(total_duration2-total_duration1)}">{(total_duration2-total_duration1)/total_duration1*100 if total_duration1>0 else 0:+.1f}%</td></tr>')
-    parts.append('</tbody></table>')
-
-    # Suite-by-suite breakdown
+    # --- Tabbed section: Suite Deltas | Credits | Time | Case-by-Case ---
     parts.append('<h2 id="suite-breakdown">Suite Breakdown</h2>')
-    suite_summaries.sort(key=lambda s: s.delta if s.delta is not None else 0)
-    for s in suite_summaries:
-        suite_rows = by_suite.get(s.name, [])
-        suite_class = "suite-regressed" if s.delta < -0.001 else "suite-improved" if s.delta > 0.001 else "suite-unchanged"
-        suite_id = f"suite-{s.name}".replace(" ", "-").replace("/", "-").replace(".", "-").lower()
-        parts.append(f'<details class="suite-card {suite_class}" id="{suite_id}">')
-        parts.append(f'<summary><span class="badge {_delta_color(s.delta)}">{_fmt_delta(s.delta)}</span> '
-                     f'{_esc(s.name)} <span class="meta">{_fmt_score(s.mean1)} \u2192 {_fmt_score(s.mean2)} \u00b7 '
-                     f'{s.regressed} regressed, {s.improved} improved, {s.unchanged} unchanged \u00b7 '
-                     f'credits: {s.credits1:.4f} \u2192 {s.credits2:.4f} \u00b7 '
-                     f'time: {_fmt_duration(s.duration1)} \u2192 {_fmt_duration(s.duration2)}</span></summary>')
+    parts.append('<div class="tab-bar">')
+    parts.append('<input type="radio" name="suite-tabs" id="rt-deltas" checked onchange="switchTab(\'deltas\')"/>')
+    parts.append('<label for="rt-deltas">Suite Deltas</label>')
+    parts.append('<input type="radio" name="suite-tabs" id="rt-credits" onchange="switchTab(\'credits\')"/>')
+    parts.append('<label for="rt-credits">Credits</label>')
+    parts.append('<input type="radio" name="suite-tabs" id="rt-time" onchange="switchTab(\'time\')"/>')
+    parts.append('<label for="rt-time">Time</label>')
+    parts.append('<input type="radio" name="suite-tabs" id="rt-cases" onchange="switchTab(\'cases\')"/>')
+    parts.append('<label for="rt-cases">Case-by-Case</label>')
+    parts.append('</div>')
 
-        for r in sorted(suite_rows, key=lambda r: r.delta if r.delta is not None else 0):
-            case_class = _delta_color(r.delta)
-            case_id = f"suitecase-{s.name}-{r.case_name}".replace(" ", "-").replace("/", "-").replace(".", "-").lower()
-            parts.append(f'<details class="case-card" id="{case_id}">')
-            parts.append(f'<summary><span class="badge {case_class}">{_fmt_delta(r.delta)}</span> '
-                         f'{_esc(r.case_name)} <span class="meta">{_fmt_score(r.v1)} \u2192 {_fmt_score(r.v2)}</span></summary>')
+    # --- Tab 1: Suite Deltas (dual) ---
+    def _suite_deltas_table(summaries, o_means):
+        p = ['<table class="multi-table"><thead><tr><th class="sortable" data-col="0" onclick="sortSuites(0)">Suite</th>']
+        for i in range(n):
+            p.append(f'<th class="sortable" data-col="{i+1}" onclick="sortSuites({i+1})">{_esc(labels[i])}</th>')
+        for i in range(n):
+            if i != bl:
+                p.append(f'<th class="sortable" data-col="{n+i}" onclick="sortSuites({n+i})">\u0394 ({_esc(labels[i])})</th>')
+        p.append('</tr></thead><tbody>')
+        for s in sorted(summaries, key=lambda s: -s.means[bl]):
+            d_sort = [s.name] + [f"{s.means[i]:.6f}" for i in range(n)] + [f"{s.means[i] - s.means[bl]:.6f}" for i in range(n) if i != bl]
+            c_sort = [s.name] + [f"{s.credits[i]:.8f}" for i in range(n)]
+            t_sort = [s.name] + [f"{s.durations[i]:.8f}" for i in range(n)]
+            sort_attrs = ""
+            for i, v in enumerate(d_sort):
+                sort_attrs += f' data-sort-deltas-{i}="{v}"'
+            for i, v in enumerate(c_sort):
+                sort_attrs += f' data-sort-credits-{i}="{v}"'
+            for i, v in enumerate(t_sort):
+                sort_attrs += f' data-sort-time-{i}="{v}"'
+            p.append(f'<tr {sort_attrs}><td>{_esc(s.name)}</td>')
+            for i in range(n):
+                p.append(f'<td class="num-cell">{_fmt_score(s.means[i])}</td>')
+            for i in range(n):
+                if i != bl:
+                    d = s.means[i] - s.means[bl]
+                    p.append(f'<td class="num-cell {_delta_color(d)}">{_fmt_pp(d)}</td>')
+            p.append('</tr>')
+        p.append('<tr class="totals"><td>Overall</td>')
+        for i in range(n):
+            p.append(f'<td class="num-cell">{o_means[i]:.3f}</td>')
+        for i in range(n):
+            if i != bl:
+                d = o_means[i] - o_means[bl]
+                p.append(f'<td class="num-cell {_delta_color(d)}">{_fmt_pp(d)}</td>')
+        p.append('</tr></tbody></table>')
+        return "".join(p)
+
+    parts.append('<div class="tab-panel active" id="tab-deltas">')
+    parts.append('<div class="view-all">')
+    parts.append(_suite_deltas_table(all_suite_summaries, all_means))
+    parts.append('</div>')
+    parts.append('<div class="view-filtered" style="display:none">')
+    parts.append(_suite_deltas_table(filtered_suite_summaries, overall_means))
+    parts.append('</div>')
+    parts.append('</div>')
+
+    # --- Tab 2: Credits (dual) ---
+    def _credits_table(summaries, t_credits):
+        p = ['<table class="cost-table"><thead><tr><th class="sortable" data-col="0" onclick="sortSuites(0)">Suite</th>']
+        for i in range(n):
+            p.append(f'<th class="sortable" data-col="{i+1}" onclick="sortSuites({i+1})">{_esc(labels[i])}</th>')
+        p.append('</tr></thead><tbody>')
+        for s in sorted(summaries, key=lambda s: -sum(s.credits)):
+            d_sort = [s.name] + [f"{s.means[i]:.6f}" for i in range(n)] + [f"{s.means[i] - s.means[bl]:.6f}" for i in range(n) if i != bl]
+            c_sort = [s.name] + [f"{s.credits[i]:.8f}" for i in range(n)]
+            t_sort = [s.name] + [f"{s.durations[i]:.8f}" for i in range(n)]
+            sort_attrs = ""
+            for i, v in enumerate(d_sort):
+                sort_attrs += f' data-sort-deltas-{i}="{v}"'
+            for i, v in enumerate(c_sort):
+                sort_attrs += f' data-sort-credits-{i}="{v}"'
+            for i, v in enumerate(t_sort):
+                sort_attrs += f' data-sort-time-{i}="{v}"'
+            p.append(f'<tr {sort_attrs}><td>{_esc(s.name)}</td>')
+            for i in range(n):
+                p.append(f'<td class="num-cell">{s.credits[i]:.4f}</td>')
+            p.append('</tr>')
+        p.append('<tr class="totals"><td>Total</td>')
+        for i in range(n):
+            p.append(f'<td class="num-cell">{t_credits[i]:.4f}</td>')
+        p.append('</tr></tbody></table>')
+        return "".join(p)
+
+    parts.append('<div class="tab-panel" id="tab-credits">')
+    parts.append('<div class="view-all">')
+    parts.append(_credits_table(all_suite_summaries, total_credits))
+    parts.append('</div>')
+    parts.append('<div class="view-filtered" style="display:none">')
+    parts.append(_credits_table(filtered_suite_summaries, f_total_credits))
+    parts.append('</div>')
+    parts.append('</div>')
+
+    # --- Tab 3: Time (dual) ---
+    def _time_table(summaries, t_durations):
+        p = ['<table class="cost-table"><thead><tr><th class="sortable" data-col="0" onclick="sortSuites(0)">Suite</th>']
+        for i in range(n):
+            p.append(f'<th class="sortable" data-col="{i+1}" onclick="sortSuites({i+1})">{_esc(labels[i])}</th>')
+        p.append('</tr></thead><tbody>')
+        for s in sorted(summaries, key=lambda s: -sum(s.durations)):
+            d_sort = [s.name] + [f"{s.means[i]:.6f}" for i in range(n)] + [f"{s.means[i] - s.means[bl]:.6f}" for i in range(n) if i != bl]
+            c_sort = [s.name] + [f"{s.credits[i]:.8f}" for i in range(n)]
+            t_sort = [s.name] + [f"{s.durations[i]:.8f}" for i in range(n)]
+            sort_attrs = ""
+            for i, v in enumerate(d_sort):
+                sort_attrs += f' data-sort-deltas-{i}="{v}"'
+            for i, v in enumerate(c_sort):
+                sort_attrs += f' data-sort-credits-{i}="{v}"'
+            for i, v in enumerate(t_sort):
+                sort_attrs += f' data-sort-time-{i}="{v}"'
+            p.append(f'<tr {sort_attrs}><td>{_esc(s.name)}</td>')
+            for i in range(n):
+                p.append(f'<td class="num-cell">{_fmt_duration(s.durations[i])}</td>')
+            p.append('</tr>')
+        p.append('<tr class="totals"><td>Total</td>')
+        for i in range(n):
+            p.append(f'<td class="num-cell">{_fmt_duration(t_durations[i])}</td>')
+        p.append('</tr></tbody></table>')
+        return "".join(p)
+
+    parts.append('<div class="tab-panel" id="tab-time">')
+    parts.append('<div class="view-all">')
+    parts.append(_time_table(all_suite_summaries, total_durations))
+    parts.append('</div>')
+    parts.append('<div class="view-filtered" style="display:none">')
+    parts.append(_time_table(filtered_suite_summaries, f_total_durations))
+    parts.append('</div>')
+    parts.append('</div>')
+
+    # --- Tab 4: Case-by-Case ---
+    by_suite: dict[str, list[SimpleNamespace]] = defaultdict(list)
+    for r in rows:
+        by_suite[r.exp_name].append(r)
+
+    filtered_by_name = {s.name: s for s in filtered_suite_summaries}
+    all_by_name = {s.name: s for s in all_suite_summaries}
+
+    parts.append('<div class="tab-panel" id="tab-cases">')
+    parts.append('<div class="cases-container">')
+    for s in sorted(all_suite_summaries, key=lambda s: -s.means[bl]):
+        suite_rows = by_suite.get(s.name, [])
+        suite_id = f"suite-{_slug(s.name)}"
+        bl_mean = s.means[bl]
+        best_mean = max(s.means)
+        suite_class = "suite-improved" if best_mean > bl_mean + 0.001 else "suite-regressed" if best_mean < bl_mean - 0.001 else "suite-unchanged"
+
+        d_sort = [s.name] + [f"{s.means[i]:.6f}" for i in range(n)] + [f"{s.means[i] - s.means[bl]:.6f}" for i in range(n) if i != bl]
+        c_sort = [s.name] + [f"{s.credits[i]:.8f}" for i in range(n)]
+        t_sort = [s.name] + [f"{s.durations[i]:.8f}" for i in range(n)]
+        sort_attrs = ""
+        for i, v in enumerate(d_sort):
+            sort_attrs += f' data-sort-deltas-{i}="{v}"'
+        for i, v in enumerate(c_sort):
+            sort_attrs += f' data-sort-credits-{i}="{v}"'
+        for i, v in enumerate(t_sort):
+            sort_attrs += f' data-sort-time-{i}="{v}"'
+
+        parts.append(f'<details class="{suite_class}" id="{suite_id}" {sort_attrs}>')
+
+        fs = filtered_by_name.get(s.name)
+        aS = all_by_name.get(s.name, s)
+        def _case_summary(summ, case_count):
+            return (f'{_esc(summ.name)} \u00b7 '
+                    + " / ".join(f"{_fmt_score(m)}" for m in summ.means) +
+                    f' \u00b7 {case_count} cases \u00b7 '
+                    + " / ".join(_fmt_duration(d) for d in summ.durations))
+
+        parts.append(f'<summary>'
+                     f'<span class="view-all">{_case_summary(aS, len(suite_rows))}</span>')
+        if fs:
+            fs_rows = sum(1 for r in suite_rows if all(v is not None for v in r.vals))
+            parts.append(f'<span class="view-filtered" style="display:none">{_case_summary(fs, fs_rows)}</span>')
+        parts.append('</summary>')
+
+        for r in sorted(suite_rows, key=lambda r: -(max(r.vals) - min(r.vals) if all(v is not None for v in r.vals) else 0)):
+            case_id = f"case-{_slug(s.name)}-{_slug(r.case_name)}"
+            all_scored = all(v is not None for v in r.vals)
+            parts.append(f'<details class="case-card{" fullscore" if all_scored else ""}" id="{case_id}">')
+
+            max_val = max((v for v in r.vals if v is not None), default=None)
+            score_strs = []
+            for i in range(n):
+                v = r.vals[i]
+                badge_class = "best" if v == max_val and v is not None else _delta_color(
+                    v - r.vals[bl] if i != bl and v is not None and r.vals[bl] is not None else None
+                )
+                score_strs.append(f'<span class="badge {badge_class}">{_fmt_score(v)}</span> {_esc(labels[i])}')
+
+            score_summary = " \u00b7 ".join(score_strs)
+            parts.append(f'<summary>{score_summary} \u00b7 {_esc(r.case_name)}</summary>')
             parts.append('<div class="case-detail">')
 
-            all_score_names = sorted(set(r.all_scores1) | set(r.all_scores2))
+            all_score_names = sorted(set().union(*(set(sl) for sl in r.all_scores_list)))
             if all_score_names:
-                parts.append('<table class="scores-table"><thead><tr><th>Score</th>'
-                             f'<th>{_esc(label1)}</th><th>{_esc(label2)}</th><th>Delta</th></tr></thead><tbody>')
+                parts.append('<table class="scores-table"><thead><tr><th>Score</th>')
+                for i in range(n):
+                    parts.append(f'<th>{_esc(labels[i])}</th>')
+                parts.append('</tr></thead><tbody>')
                 for sn in all_score_names:
-                    sv1 = r.all_scores1.get(sn)
-                    sv2 = r.all_scores2.get(sn)
-                    sd = (sv2 - sv1) if sv1 is not None and sv2 is not None else None
-                    parts.append(f'<tr><td>{_esc(sn)}</td>'
-                                 f'<td class="num-cell">{_fmt_score(sv1)}</td>'
-                                 f'<td class="num-cell">{_fmt_score(sv2)}</td>'
-                                 f'<td class="num-cell {_delta_color(sd)}">{_fmt_delta(sd)}</td></tr>')
+                    parts.append(f'<tr><td>{_esc(sn)}</td>')
+                    for i in range(n):
+                        sv = r.all_scores_list[i].get(sn) if i < len(r.all_scores_list) else None
+                        parts.append(f'<td class="num-cell">{_fmt_score(sv)}</td>')
+                    parts.append('</tr>')
                 parts.append('</tbody></table>')
 
-            parts.append(f'<p class="meta">Credits: {r.credits1:.4f} \u2192 {r.credits2:.4f} \u00b7 Time: {_fmt_duration(r.duration1)} \u2192 {_fmt_duration(r.duration2)}</p>')
+            credits_str = " / ".join(f"{r.credits[i]:.4f}" for i in range(n))
+            time_str = " / ".join(_fmt_duration(r.durations[i]) for i in range(n))
+            parts.append(f'<p class="meta">Credits: {credits_str} \u00b7 Time: {time_str}</p>')
 
-            if r.reason1 or r.reason2:
+            has_reasons = any(r.reasons[i] for i in range(n))
+            if has_reasons:
                 parts.append('<div class="reasons">')
-                if r.reason1:
-                    parts.append(f'<p><strong>{_esc(label1)}:</strong> <code>{_esc(r.reason1[:500])}</code></p>')
-                if r.reason2:
-                    parts.append(f'<p><strong>{_esc(label2)}:</strong> <code>{_esc(r.reason2[:500])}</code></p>')
+                for i in range(n):
+                    if r.reasons[i]:
+                        parts.append(f'<p><strong>{_esc(labels[i])}:</strong> <code>{_esc(r.reasons[i][:400])}</code></p>')
                 parts.append('</div>')
 
-            if r.trace1 or r.trace2:
+            has_traces = any(r.traces[i] for i in range(n))
+            if has_traces:
                 parts.append('<div class="trace-links">')
-                if r.trace1:
-                    parts.append(f'<a href="{_esc(r.trace1)}" target="_blank" class="trace-link">Trace ({_esc(label1)}) \u2197</a>')
-                if r.trace2:
-                    parts.append(f'<a href="{_esc(r.trace2)}" target="_blank" class="trace-link">Trace ({_esc(label2)}) \u2197</a>')
+                for i in range(n):
+                    if r.traces[i]:
+                        parts.append(f'<a href="{_esc(r.traces[i])}" target="_blank" class="trace-link">Trace ({_esc(labels[i])}) \u2197</a>')
                 parts.append('</div>')
 
             parts.append('<div class="cmds">')
-            parts.append(f'<code>uv run python -m agent_evals.scripts.inspect_eval --exp {r.exp_id1} --case "{_esc(r.case_name)}"</code><br>')
-            parts.append(f'<code>uv run python -m agent_evals.scripts.inspect_eval --exp {r.exp_id2} --case "{_esc(r.case_name)}"</code><br>')
-            parts.append(f'<code>uv run python -m agent_evals.scripts.fetch_traces --exp {r.exp_id1} --case "{_esc(r.case_name)}"</code><br>')
-            parts.append(f'<code>uv run python -m agent_evals.scripts.fetch_traces --exp {r.exp_id2} --case "{_esc(r.case_name)}"</code>')
+            for i in range(n):
+                if r.exp_ids[i]:
+                    parts.append(f'<code>uv run python -m agent_evals.scripts.inspect_eval --exp {r.exp_ids[i]} --case "{_esc(r.case_name)}"</code><br>')
+                    parts.append(f'<code>uv run python -m agent_evals.scripts.fetch_traces --exp {r.exp_ids[i]} --case "{_esc(r.case_name)}"</code>')
+                    if i < n - 1:
+                        parts.append('<br>')
             parts.append('</div>')
 
             parts.append('</div></details>')
 
         parts.append('</details>')
 
-    # Footer
-    parts.append('<div class="footer"><code>Generated by agent-eval \u00b7 '
-                 f'compare_experiments --tag1 {" ".join(tags1)} --tag2 {" ".join(tags2)} --score {_esc(score)}</code></div>')
+    parts.append('</div>')
+    parts.append('</div>')
+
+    # --- Footer ---
+    cmd_parts = []
+    for i in range(n):
+        cmd_parts.append(f"--tag {' '.join(tags_list[i])} --label {labels[i]}")
+    parts.append('<div class="footer"><code>Generated by agent-eval \u00b7 generate_report '
+                 + ' '.join(cmd_parts) +
+                 f' --score {_esc(score)}</code></div>')
 
     parts.append(_HTML_TAIL)
     return "\n".join(parts)
 
 
-def _add_insights_to_report(report_path: Path, insights_html: str) -> None:
-    """Inject or replace insights HTML in an existing report file.
+# --- insights injection ------------------------------------------------------
 
-    Looks for ``<details open id="insights">`` and replaces its inner content.
-    If the insights section doesn't exist yet, inserts it right before the
-    ``<details open id="beta-context">`` element. If that anchor is missing,
-    inserts after the controls div.
-    """
+def _add_insights_to_report(report_path: Path, insights_html: str) -> None:
+    """Inject or replace insights HTML in an existing report file."""
     import re
     content = report_path.read_text(encoding="utf-8")
 
@@ -735,46 +1304,73 @@ def _add_insights_to_report(report_path: Path, insights_html: str) -> None:
         '</details>'
     )
 
-    # Check if insights section already exists
     pattern = r'<details open id="insights">.*?</details>'
     if re.search(pattern, content, re.DOTALL):
         content = re.sub(pattern, insights_block, content, count=1, flags=re.DOTALL)
-    elif '<details open id="beta-context">' in content:
-        content = content.replace(
-            '<details open id="beta-context">',
-            insights_block + '\n\n    <details open id="beta-context">',
-            1,
+    elif re.search(r'<details open id="run-diff-\d+">', content):
+        content = re.sub(
+            r'(<details open id="run-diff-\d+">)',
+            insights_block + '\n\n    \\1',
+            content,
+            count=1,
         )
+    elif '<h2 id="rankings">' in content:
+        content = content.replace('<h2 id="rankings">', insights_block + '\n\n    <h2 id="rankings">', 1)
     else:
-        # Fallback: insert after the controls div
-        anchor = '</div>\n\n    # Beta context'
-        if anchor in content:
-            content = content.replace(anchor, '</div>\n\n    ' + insights_block + '\n\n    # Beta context', 1)
-        else:
-            print("Warning: could not find insertion point for insights.", file=sys.stderr)
+        print("Warning: could not find insertion point for insights.", file=sys.stderr)
+        return
 
     report_path.write_text(content, encoding="utf-8")
     print(f"Insights injected into {report_path} ({report_path.stat().st_size} bytes)")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate HTML eval report")
+# --- main --------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate a self-contained HTML eval report comparing N eval runs."
+    )
     subparsers = parser.add_subparsers(dest="mode")
 
-    # Default: generate report
-    gen = subparsers.add_parser("generate", help="Generate a new HTML report from Opik or local data")
-    gen.add_argument("--tag1", required=True, nargs="+", help="Tag(s) for side 1 (baseline). Multiple tags are merged, newest per suite wins.")
-    gen.add_argument("--tag2", required=True, nargs="+", help="Tag(s) for side 2 (under test). Multiple tags are merged, newest per suite wins.")
-    gen.add_argument("--score", default="overall", help="Feedback score to compare")
-    gen.add_argument("-o", "--output", default="report.html", help="Output file")
-    gen.add_argument("--label1", default=None, help="Label for side 1")
-    gen.add_argument("--label2", default=None, help="Label for side 2")
-    gen.add_argument("--beta-context", default=None, help="Path to an HTML file with beta-changes context (optional)")
-    gen.add_argument("--insights", default=None, help="Path to an HTML file with author-written insights (optional, can also be added later via add-insights)")
-    gen.add_argument("--source", default="opik", choices=("opik", "local"), help="Data source (default: opik).")
-    gen.add_argument("--results-dir", action="append", default=[], help="Path to results directory for local source (repeatable, default: results/).")
+    gen = subparsers.add_parser("generate", help="Generate a new HTML report")
+    gen.add_argument(
+        "--tag", action="append", nargs="+", required=True,
+        help="Tag(s) for a run (repeatable, multiple tags per run are merged). "
+             "Each --tag group starts a new run; use --label to name it.",
+    )
+    gen.add_argument(
+        "--label", action="append", required=True,
+        help="Label for each run (must match number of --tag groups).",
+    )
+    gen.add_argument(
+        "--score", default="overall",
+        help="Feedback score to compare (default: overall).",
+    )
+    gen.add_argument(
+        "-o", "--output", default="report.html",
+        help="Output HTML file.",
+    )
+    gen.add_argument(
+        "--baseline", type=int, default=0,
+        help="Baseline run index (0-based, default: 0 = first --tag/--label pair).",
+    )
+    gen.add_argument(
+        "--source", default="opik", choices=("opik", "local"),
+        help="Data source (default: opik).",
+    )
+    gen.add_argument(
+        "--results-dir", action="append", default=[],
+        help="Path to results directory for local source (repeatable).",
+    )
+    gen.add_argument(
+        "--insights", default=None,
+        help="Path to an HTML file with author-written insights (optional).",
+    )
+    gen.add_argument(
+        "--run-differences", action="append", default=[],
+        help="Path to an HTML file with run-specific context (repeatable, one per --tag group).",
+    )
 
-    # Add insights to existing report
     add = subparsers.add_parser("add-insights", help="Inject author-written insights into an existing report")
     add.add_argument("-o", "--output", required=True, help="Path to existing report HTML")
     add.add_argument("--insights", required=True, help="Path to an HTML file with author-written insights")
@@ -796,62 +1392,75 @@ def main():
         _add_insights_to_report(report_path, insights_html)
         return
 
-    # Generate mode
-    if not hasattr(args, "tag1"):
+    if not hasattr(args, "tag"):
         parser.error("Use 'generate' or 'add-insights' subcommand")
 
-    tags1 = args.tag1 if isinstance(args.tag1, list) else [args.tag1]
-    tags2 = args.tag2 if isinstance(args.tag2, list) else [args.tag2]
-    label1 = args.label1 or tags1[0]
-    label2 = args.label2 or tags2[0]
+    if len(args.tag) != len(args.label):
+        parser.error(f"Got {len(args.tag)} --tag groups but {len(args.label)} --label values; they must match.")
 
-    source = make_source(getattr(args, "source", "opik"), results_dir=getattr(args, "results_dir", []) or None)
-    print(f"Discovering experiments for tags1={tags1!r}...")
-    exps1 = _find_by_tags(source, tags1, "side1")
-    print(f"  found {len(exps1)} experiments")
-    print(f"Discovering experiments for tags2={tags2!r}...")
-    exps2 = _find_by_tags(source, tags2, "side2")
-    print(f"  found {len(exps2)} experiments")
-    matched = sorted(set(exps1) & set(exps2))
+    n = len(args.tag)
+    if args.baseline < 0 or args.baseline >= n:
+        parser.error(f"--baseline {args.baseline} out of range (0..{n-1}).")
+
+    source = make_source(args.source, results_dir=args.results_dir or None)
+
+    labels = args.label
+    tags_list = args.tag
+
+    # Load run-differences files
+    run_differences_list: list[str] = []
+    rd_files = args.run_differences or []
+    if len(rd_files) > n:
+        parser.error(f"Got {len(rd_files)} --run-differences files but only {n} runs.")
+    for f in rd_files[:n]:
+        p = Path(f)
+        if p.exists():
+            run_differences_list.append(p.read_text(encoding="utf-8"))
+        else:
+            print(f"Warning: run-differences file not found: {f}", file=sys.stderr)
+            run_differences_list.append("")
+    while len(run_differences_list) < n:
+        run_differences_list.append("")
+
+    sides: list[dict[str, SimpleNamespace]] = []
+    for i in range(n):
+        print(f"Discovering experiments for {labels[i]!r} (tags={tags_list[i]!r})...")
+        exps = _find_by_tags(source, tags_list[i], labels[i])
+        print(f"  found {len(exps)} experiments")
+        sides.append(exps)
+
+    matched = sorted(set.intersection(*(set(s) for s in sides)))
     print(f"Matched: {len(matched)} suites")
 
-    print(f"Building comparison (score={args.score})...")
-    rows, suite_summaries, only1, only2 = build_comparison(source, exps1, exps2, args.score)
+    print(f"Building comparison (score={args.score}, baseline={labels[args.baseline]!r})...")
+    rows, suite_summaries, only_sets = build_comparison(source, sides, args.score, args.baseline)
 
-    scored = [r for r in rows if r.delta is not None]
+    scored = [r for r in rows if all(v is not None for v in r.vals)]
     if scored:
-        m1 = sum(r.v1 for r in scored) / len(scored)
-        m2 = sum(r.v2 for r in scored) / len(scored)
-        r_count = sum(1 for r in scored if r.delta < 0)
-        i_count = sum(1 for r in scored if r.delta > 0)
-        u_count = sum(1 for r in scored if r.delta == 0)
-        print(f"\nMean {args.score}: {m1:.3f} -> {m2:.3f} ({len(scored)} matched: {i_count} improved, {r_count} regressed, {u_count} unchanged)")
-        tc1 = sum(s.credits1 for s in suite_summaries)
-        tc2 = sum(s.credits2 for s in suite_summaries)
-        print(f"Credits: {tc1:.4f} -> {tc2:.4f} ({tc2-tc1:+.4f}, {(tc2-tc1)/tc1*100 if tc1>0 else 0:+.1f}%)")
+        for i in range(n):
+            m = sum(r.vals[i] for r in scored) / len(scored)
+            print(f"  {labels[i]}: mean={m:.3f}")
+        r_count = sum(1 for r in scored if _is_regression(r, args.baseline))
+        i_count = sum(1 for r in scored if _is_improvement(r, args.baseline))
+        u_count = len(scored) - r_count - i_count
+        print(f"  {len(scored)} matched cases: {i_count} improved, {r_count} regressed, {u_count} unchanged")
 
-    if only1:
-        print(f"Only in {label1}: {', '.join(sorted(only1))}")
-    if only2:
-        print(f"Only in {label2}: {', '.join(sorted(only2))}")
+    for i in range(n):
+        if only_sets[i]:
+            print(f"Only in {labels[i]}: {', '.join(sorted(only_sets[i]))}")
 
+    print(f"\nGenerating HTML report...")
     insights_html = ""
     if getattr(args, "insights", None):
         ins_path = Path(args.insights)
         if ins_path.exists():
             insights_html = ins_path.read_text(encoding="utf-8")
 
-    # Optional beta context
-    beta_context_html = ""
-    if getattr(args, "beta_context", None):
-        bc_path = Path(args.beta_context)
-        if bc_path.exists():
-            beta_context_html = bc_path.read_text(encoding="utf-8")
-
-    print(f"\nGenerating HTML report...")
-    html_content = generate_html(rows, suite_summaries, only1, only2, tags1, tags2, label1, label2, args.score,
-                                  insights_html=insights_html,
-                                  beta_context_html=beta_context_html)
+    html_content = generate_report_html(
+        rows, suite_summaries, only_sets, labels, tags_list, args.score, args.baseline,
+        insights_html=insights_html,
+        run_differences_list=run_differences_list,
+    )
 
     out_path = Path(args.output)
     out_path.write_text(html_content, encoding="utf-8")

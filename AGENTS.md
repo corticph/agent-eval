@@ -9,7 +9,7 @@ to Opik, and can be compared across runs to find regressions.
 This file covers the core workflows. For deeper topics, see:
 
 - [`docs/eval-report-style.md`](docs/eval-report-style.md) — layout, theme, and
-  UX preferences for self-contained HTML eval reports (2-sided `generate_report`)
+  UX preferences for self-contained HTML eval reports (`generate_report`)
 
 ### Environment ordering
 
@@ -452,15 +452,26 @@ UX preferences for self-contained HTML reports.
 
 The report generator (`agent_evals.scripts.generate_report`) is an **example
 script** — adapt the categorization, styling, and layout to your own workflow.
-It produces the report in two steps:
+It handles both pairwise (N=2) and multi-run (N>2) comparisons; pairwise is
+just a special case of multi-run with two `--tag` groups. It produces the
+report in two steps:
 
 ```bash
-# 1. Generate the report from Opik or local data (supports multiple tags per side,
-#    newest experiment per suite name wins):
+# 1. Generate the report from Opik or local data.
+#    Pass one --tag/--label pair per run — 2 for pairwise, 3+ for multi-run.
+#    Multiple tags per run are merged (newest experiment per suite wins):
 uv run python -m agent_evals.scripts.generate_report generate \
-    --tag1 <baseline-tag> --tag2 <beta-tag> \
-    --label1 "baseline" --label2 "beta" \
+    --tag <baseline-tag> --label "baseline" \
+    --tag <beta-tag> --label "beta" \
     -o report.html
+
+# For a 3+ run multi-model comparison, add more --tag/--label pairs:
+uv run python -m agent_evals.scripts.generate_report generate \
+    --tag "dev-default-${TS}" --label "Default (dev)" \
+    --tag "dev-corti-s1-instant-${TS}" --label "corti-s1-instant" \
+    --tag "dev-corti-s1-${TS}" --label "corti-s1" \
+    --baseline 0 \
+    -o results/multi-model-comparison.html
 
 # 2. Inspect the report, find element IDs you want to link to
 #    (e.g. #rca-timeout, #case-no-data-parts-my_case, #imp-my_case)
@@ -471,6 +482,22 @@ uv run python -m agent_evals.scripts.generate_report add-insights \
     -o report.html --insights /tmp/insights.html
 ```
 
+Key flags:
+- `--tag` — repeatable; multiple tags per run are merged (newest result per
+  suite wins). Each `--tag` group starts a new run; pair with `--label`.
+- `--label` — one per `--tag` group; must match count.
+- `--baseline N` — 0-based index of the baseline run (default: 0).
+- `--source` — `opik` (default, local-cache-first) or `local`.
+- `--results-dir` — path to results directory for local source (repeatable, default: `results/`).
+- `--insights` — path to an HTML file with author-written analysis.
+- `--run-differences` — repeatable, one file per run; extra context
+  describing what changed in that run (replaces the old `--beta-context`).
+- `--score` — feedback score to compare (default: `overall`).
+
+The report has tabbed suite breakdown (Suite Deltas / Credits / Case-by-Case)
+with sortable column headers, and anchor links that auto-expand parent
+details and switch tabs.
+
 **Before injecting insights, verify every quantitative claim** against the
 data — run the comparison through a script to get exact counts, categorize
 all regressions programmatically, and grep the generated HTML to confirm
@@ -478,10 +505,11 @@ every `href="#..."` link resolves to an existing `id`. See
 [`docs/eval-report-style.md`](docs/eval-report-style.md) for the full checklist and
 report structure.
 
-## 6. Multi-model comparison
+### Multi-model comparison
 
-For comparing 3+ model runs side by side, use `compare_multi`. Run one sweep
-per model with `--model` and a unique tag, then generate the report:
+For comparing 3+ model runs side by side, run one sweep per model with
+`--model` and a unique tag, then generate the report with a `--tag/--label`
+pair per model:
 
 ```bash
 # Run one sweep per model (parallel, each with its own tag):
@@ -495,7 +523,7 @@ uv run agent-evals sweep --env dev-weu --no-opik --jobs 5 \
 wait
 
 # Generate the multi-way comparison report:
-uv run python -m agent_evals.scripts.compare_multi \
+uv run python -m agent_evals.scripts.generate_report generate \
     --source local \
     --tag "dev-default-${TS}" --label "Default (dev)" \
     --tag "dev-corti-s1-instant-${TS}" --label "corti-s1-instant" \
@@ -503,24 +531,6 @@ uv run python -m agent_evals.scripts.compare_multi \
     --baseline 0 \
     --insights /tmp/insights.html \
     -o results/multi-model-comparison.html
-```
-
-Key flags:
-- `--tag` — repeatable; multiple tags per run are merged (newest result per
-  suite wins). Each `--tag` group starts a new run; pair with `--label`.
-- `--label` — one per `--tag` group; must match count.
-- `--baseline N` — 0-based index of the baseline run (default: 0).
-- `--source` — `opik` (default, local-cache-first) or `local`.
-- `--insights` — path to an HTML file with author-written analysis.
-
-The report has tabbed suite breakdown (Suite Deltas / Credits / Case-by-Case)
-with sortable column headers, and anchor links that auto-expand parent
-details and switch tabs. Use `add-insights` to inject or update insights
-after generation:
-
-```bash
-uv run python -m agent_evals.scripts.compare_multi add-insights \
-    -o results/multi-model-comparison.html --insights /tmp/insights.html
 ```
 
 ### Filling coverage gaps
@@ -534,11 +544,11 @@ uv run agent-evals run <evals-dir>/pubmed/reference.yaml --env dev-weu \
     --model corti-s1 --tag "dev-corti-s1-${TS}"
 ```
 
-Verify all runs have the same suites before generating the report —
-`compare_multi` shows "Only in" warnings, but the report is cleaner when
+Verify all runs have the same suites before generating the report — the
+report generator shows "Only in" warnings, but the report is cleaner when
 all sides match.
 
-## 7. Linking the evals directory
+## 6. Linking the evals directory
 
 This repo is the eval harness only. The suite YAML files, expectations, and
 fixtures live in a separate cases repo. The scripts look for them in this
