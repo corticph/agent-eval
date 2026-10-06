@@ -77,12 +77,15 @@ class ExpectedState(Expectation):
             )
         else:
             passed = normalized not in _TERMINAL_FAILURE_STATES
-            detail = (
-                _PASSED
-                if passed
-                else f"task ended in terminal state {state!r}; declare "
-                f"expected_state: {state} if this outcome is intended"
-            )
+            if passed:
+                detail = _PASSED
+            else:
+                detail = (
+                    f"task ended in terminal state {state!r}; declare "
+                    f"expected_state: {state} if this outcome is intended"
+                )
+                if ctx.plain_text:
+                    detail = f"{detail} — {ctx.plain_text}"
         return ExpectationResult(self.key, [CheckResult("", passed, detail)])
 
     def continues_task(self) -> bool:

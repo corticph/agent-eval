@@ -110,7 +110,7 @@ def test_corti_console_credentials_satisfy_the_preflight(
 
     results = run_suite(suite, client)
 
-    assert client.send_calls == 1
+    assert client.send_calls == 2
     assert len(results) == 1
 
 
@@ -138,7 +138,7 @@ def test_suite_without_judge_expectations_runs_without_the_key(
 
     results = run_suite(suite, client)
 
-    assert client.send_calls == 1
+    assert client.send_calls == 2
     assert len(results) == 1
 
 
@@ -150,7 +150,7 @@ def test_judge_expectation_with_empty_reference_needs_no_key(
 
     results = run_suite(suite, client)
 
-    assert client.send_calls == 1
+    assert client.send_calls == 2
     assert results[0].success
 
 

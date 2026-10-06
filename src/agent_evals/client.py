@@ -19,7 +19,7 @@ from .errors import (
 _LOGGER = logging.getLogger(__name__)
 
 # (connect timeout, read timeout) in seconds
-_DEFAULT_TIMEOUT: tuple[float, float] = (5, 120)
+_DEFAULT_TIMEOUT: tuple[float, float] = (5, 180)
 
 # Longest a single HTTP request may block with the default timeouts. Eval
 # wall-clock timeouts (``timeout_seconds``) must exceed this: the timeout
@@ -94,6 +94,31 @@ class AgentClient:
                 f"Request timed out: {method} {url}\n"
                 f"The service at {self.environment.base_url} did not respond in time."
             ) from exc
+
+        # On 401, refresh the token and retry once.
+        if response.status_code == 401:
+            _LOGGER.info("Got 401, refreshing OAuth token and retrying %s %s", method, url)
+            self._refresh_token()
+            try:
+                response = self.session.request(
+                    method,
+                    url,
+                    json=json_body,
+                    params=params,
+                    headers=headers,
+                    timeout=timeout,
+                )
+            except requests.ConnectionError as exc:
+                raise NetworkError(
+                    f"Connection failed: could not reach {self.environment.base_url}\n"
+                    f"Is the service running?"
+                ) from exc
+            except requests.Timeout as exc:
+                raise RequestTimeoutError(
+                    f"Request timed out: {method} {url}\n"
+                    f"The service at {self.environment.base_url} did not respond in time."
+                ) from exc
+
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
@@ -114,6 +139,11 @@ class AgentClient:
             raise InvalidResponseError(
                 f"Response was not valid JSON for {method} {url}"
             ) from exc
+
+    def _refresh_token(self) -> None:
+        """Force a new OAuth token and update the session headers."""
+        self.environment.invalidate_token()
+        self.session.headers.update(self.environment.headers())
 
     def create_agent(
         self,
@@ -151,11 +181,23 @@ class AgentClient:
         self,
         context_id: str,
         *,
+        page_size: int | None = None,
+        page_token: str | None = None,
         timeout: float | tuple[float, float] | None = _DEFAULT_TIMEOUT,
     ) -> dict[str, Any]:
-        """Fetch the OpenInference trace for a context (GET /v2/agentic/contexts/{id}/trace)."""
+        """Fetch the OpenInference trace for a context (GET /v2/agentic/contexts/{id}/trace).
+
+        ``page_size`` (max 200) and ``page_token`` drive the endpoint's
+        pagination; the response carries ``nextPageToken`` (``null`` when
+        exhausted) alongside the ``traces`` array.
+        """
         path = f"/v2/agentic/contexts/{context_id}/trace"
-        return self._request("GET", path, timeout=timeout)
+        params: dict[str, str | int | bool] = {}
+        if page_size is not None:
+            params["pageSize"] = page_size
+        if page_token is not None:
+            params["pageToken"] = page_token
+        return self._request("GET", path, params=params or None, timeout=timeout)
 
     def close(self) -> None:
         """Release underlying HTTP resources."""

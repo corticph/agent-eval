@@ -54,11 +54,13 @@ def _first_int(source: dict[str, Any], *keys: str) -> int | None:
 
 @dataclass(slots=True)
 class UsageMetrics:
-    """LLM usage/credits accounting from ``task.metadata`` (``$usage`` / ``credits``).
+    """LLM usage/credits accounting from ``task.metadata.corti.usage``.
 
-    Both keys are documented public extensions of the agent service's wire
-    contract, emitted per request on terminal events. Either may be absent
-    depending on the deployment, so all fields are optional.
+    The agent service emits per-request usage on terminal events under the
+    ``corti`` namespace in task metadata.  ``creditsConsumed`` is always
+    populated; ``inputTokens`` / ``outputTokens`` may appear in the future.
+    All fields are optional so a deployment that omits any of them is handled
+    gracefully.
     """
 
     input_tokens: int | None = None
@@ -74,7 +76,11 @@ class UsageMetrics:
 
     @classmethod
     def from_response(cls, response: dict[str, Any] | None) -> "UsageMetrics | None":
-        """Extract usage accounting from a task response, or None if absent."""
+        """Extract usage accounting from a task response, or None if absent.
+
+        Reads ``task.metadata.corti.usage`` which carries ``creditsConsumed``
+        and, optionally, ``inputTokens`` / ``outputTokens``.
+        """
         if not isinstance(response, dict):
             return None
         task = response.get("task")
@@ -84,21 +90,18 @@ class UsageMetrics:
         if not isinstance(metadata, dict):
             return None
 
-        # Agent API v2 carries usage under the ``$usage`` key with camelCase
-        # fields and ``credits`` nested inside it. v1 used ``_usage`` with
-        # snake_case and a top-level ``credits``; accept both.
-        usage = metadata.get("$usage")
+        corti = metadata.get("corti")
+        if not isinstance(corti, dict):
+            return None
+        usage = corti.get("usage")
         if not isinstance(usage, dict):
-            usage = metadata.get("_usage")
-        usage = usage if isinstance(usage, dict) else {}
+            return None
 
         input_tokens = _first_int(usage, "inputTokens", "input_tokens")
         output_tokens = _first_int(usage, "outputTokens", "output_tokens")
 
         credits: float | None = None
-        raw_credits = usage.get("credits")
-        if raw_credits is None:
-            raw_credits = metadata.get("credits")
+        raw_credits = usage.get("creditsConsumed")
         if isinstance(raw_credits, (int, float)) and not isinstance(raw_credits, bool):
             credits = float(raw_credits)
 

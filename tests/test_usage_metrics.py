@@ -14,46 +14,38 @@ def _task_response(metadata: dict | None) -> dict:
 
 
 class TestFromResponse:
-    def test_v2_usage_shape(self) -> None:
-        # Agent API v2: metadata.$usage with camelCase fields and nested credits.
+    def test_corti_usage_shape(self) -> None:
+        # The canonical format: metadata.corti.usage with creditsConsumed
+        # and optional inputTokens/outputTokens.
         response = _task_response(
             {
-                "$usage": {
-                    "model": "corti-default",
-                    "inputTokens": 26514,
-                    "outputTokens": 3319,
-                    "totalTokens": 29833,
-                    "credits": 0.15916,
+                "corti": {
+                    "usage": {
+                        "creditsConsumed": 0.13,
+                        "inputTokens": 26514,
+                        "outputTokens": 3319,
+                    }
                 }
             }
         )
         usage = UsageMetrics.from_response(response)
         assert usage == UsageMetrics(
-            input_tokens=26514, output_tokens=3319, credits=0.15916
-        )
-
-    def test_full_metadata(self) -> None:
-        # v1 back-compat shape: _usage snake_case with top-level credits.
-        response = _task_response(
-            {
-                "_usage": {"input_tokens": 26514, "output_tokens": 3319},
-                "credits": 0.15916,
-            }
-        )
-        usage = UsageMetrics.from_response(response)
-        assert usage == UsageMetrics(
-            input_tokens=26514, output_tokens=3319, credits=0.15916
+            input_tokens=26514, output_tokens=3319, credits=0.13
         )
 
     def test_credits_only(self) -> None:
-        usage = UsageMetrics.from_response(_task_response({"credits": 0.03582}))
+        usage = UsageMetrics.from_response(
+            _task_response({"corti": {"usage": {"creditsConsumed": 0.03582}}})
+        )
         assert usage == UsageMetrics(
             input_tokens=None, output_tokens=None, credits=0.03582
         )
 
-    def test_usage_only(self) -> None:
+    def test_tokens_only(self) -> None:
         usage = UsageMetrics.from_response(
-            _task_response({"_usage": {"input_tokens": 10, "output_tokens": 2}})
+            _task_response(
+                {"corti": {"usage": {"inputTokens": 10, "outputTokens": 2}}}
+            )
         )
         assert usage == UsageMetrics(input_tokens=10, output_tokens=2, credits=None)
 
@@ -65,11 +57,13 @@ class TestFromResponse:
 
     def test_malformed_values_ignored(self) -> None:
         usage = UsageMetrics.from_response(
-            _task_response({"_usage": "not-a-dict", "credits": "not-a-number"})
+            _task_response({"corti": {"usage": "not-a-dict"}})
         )
         assert usage is None
         usage = UsageMetrics.from_response(
-            _task_response({"_usage": {"input_tokens": "12"}, "credits": True})
+            _task_response(
+                {"corti": {"usage": {"creditsConsumed": True, "inputTokens": "12"}}}
+            )
         )
         assert usage is None
 
