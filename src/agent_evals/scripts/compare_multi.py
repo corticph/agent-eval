@@ -74,6 +74,33 @@ def _credits(item):
         return 0.0
 
 
+def _duration(item):
+    out = item.evaluation_task_output or {}
+    try:
+        return float(out.get("duration_seconds") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# --- infrastructure-failure detection -----------------------------------------
+
+_INFRA_FAILURE_PATTERNS = (
+    "HTTP 401",
+    "HTTP 503",
+    "timed out",
+    "engine is currently busy",
+    "Connection refused",
+    "Connection failed",
+    "could not reach",
+)
+
+
+def _is_infra_failure(reason: str) -> bool:
+    """True when the failure reason indicates an infrastructure issue, not a quality issue."""
+    r = reason or ""
+    return any(pat in r for pat in _INFRA_FAILURE_PATTERNS)
+
+
 # --- multi-way comparison ---------------------------------------------------
 
 def build_multi_comparison(
@@ -105,6 +132,7 @@ def build_multi_comparison(
 
         suite_cases: list[SimpleNamespace] = []
         credits_totals = [0.0] * n
+        duration_totals = [0.0] * n
 
         for case_name in all_case_names:
             its = [bn.get(case_name) for bn in by_names]
@@ -121,11 +149,24 @@ def build_multi_comparison(
             for i, it in enumerate(its):
                 sm = sms[i]
                 v, r = sm.get(score, (None, ""))
+                # Treat infrastructure-failure scores (HTTP 401, timeout, 503,
+                # etc.) as missing data so they don't drag down means or show
+                # as 0.000 in the per-score table.
+                is_infra = v is not None and v == 0.0 and _is_infra_failure(r)
+                if is_infra:
+                    v = None
                 vals.append(v)
                 reasons.append(r)
                 traces.append(source.trace_url(it) if it else None)
-                all_scores_list.append({k: v2[0] for k, v2 in sm.items()})
+                all_scores_list.append(
+                    {k: (None if is_infra else v2[0]) for k, v2 in sm.items()}
+                )
                 credits_totals[i] += _credits(it) if it else 0.0
+                duration_totals[i] += _duration(it) if it else 0.0
+
+            # Skip cases where no side has a usable (non-None) score.
+            if not any(v is not None for v in vals):
+                continue
 
             row = SimpleNamespace(
                 exp_name=exp_name,
@@ -135,6 +176,7 @@ def build_multi_comparison(
                 traces=traces,
                 all_scores_list=all_scores_list,
                 credits=[_credits(it) if it else 0.0 for it in its],
+                durations=[_duration(it) if it else 0.0 for it in its],
                 exp_ids=[e.id for e in exps],
             )
             rows.append(row)
@@ -148,10 +190,11 @@ def build_multi_comparison(
                 means=means,
                 n=len(scored),
                 credits=credits_totals,
+                durations=duration_totals,
                 exp_ids=[e.id for e in exps],
             ))
 
-    only_sets = [set(sides[i]) - set.intersection(*(set(sides[j]) for j in range(n) if j != i)) for i in range(n)]
+    only_sets = [set(sides[i]) - set.union(*(set(sides[j]) for j in range(n) if j != i)) for i in range(n)]
     return rows, suite_summaries, only_sets
 
 
@@ -185,6 +228,18 @@ def _fmt_pp(d):
     if d is None:
         return "\u2014"
     return f"{d*100:+.1f}pp"
+
+
+def _fmt_duration(seconds):
+    if seconds is None or seconds == 0:
+        return "0s"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(seconds, 60)
+    if m < 60:
+        return f"{int(m)}m{s:.0f}s"
+    h, m = divmod(m, 60)
+    return f"{int(h)}h{int(m)}m"
 
 
 _HTML_HEAD = """\
@@ -291,6 +346,12 @@ a[href^="#"]:hover { text-decoration: underline; }
 .sortable.sort-asc::after { content: " \\25b2"; opacity: 1; }
 .sortable.sort-desc::after { content: " \\25bc"; opacity: 1; }
 </style>
+<noscript><style>
+.tab-panel { display: block; }
+.tab-bar { display: none; }
+.controls { display: none; }
+#filter-toggle { display: none; }
+</style></noscript>
 </head>
 <body>
 <button class="theme-toggle" onclick="toggleTheme()"></button>
@@ -396,6 +457,27 @@ if (location.hash) {
   var id = location.hash.slice(1);
   if (id) setTimeout(function() { openAnchorTarget(id); }, 100);
 }
+
+function toggleFullScoreFilter() {
+  var cb = document.getElementById("filter-fullscore");
+  var filtered = cb.checked;
+  // Switch aggregated views (summary lines, rankings, suite tables)
+  document.querySelectorAll(".view-all").forEach(function(el) { el.style.display = filtered ? "none" : ""; });
+  document.querySelectorAll(".view-filtered").forEach(function(el) { el.style.display = filtered ? "" : "none"; });
+  // Filter case cards
+  var cases = document.querySelectorAll("#tab-cases .case-card");
+  cases.forEach(function(c) {
+    c.style.display = (filtered && !c.classList.contains("fullscore")) ? "none" : "";
+  });
+  // Hide suite headers that have no visible cases
+  var suites = document.querySelectorAll("#tab-cases .cases-container > details");
+  suites.forEach(function(s) {
+    var visible = Array.from(s.querySelectorAll(".case-card")).filter(function(c) { return c.style.display !== "none"; });
+    s.style.display = visible.length > 0 ? "" : "none";
+  });
+  // Re-apply sort in current tab
+  applySort();
+}
 </script>
 """
 
@@ -418,17 +500,25 @@ def generate_multi_html(
     n = len(labels)
     bl = labels[baseline_idx]
 
+    # --- Compute aggregates for ALL rows (per-model means over their full support) ---
+    support_counts = [sum(1 for r in rows if r.vals[i] is not None) for i in range(n)]
+    all_means = []
+    for i in range(n):
+        vals = [r.vals[i] for r in rows if r.vals[i] is not None]
+        all_means.append(sum(vals) / len(vals) if vals else 0)
+
+    # --- Compute aggregates for FULLY-SCORED rows only (fair comparison) ---
     scored = [r for r in rows if all(v is not None for v in r.vals)]
     total = len(scored)
-
+    total_cases = len(rows)
     overall_means = []
     for i in range(n):
         vals = [r.vals[i] for r in scored]
         overall_means.append(sum(vals) / len(vals) if vals else 0)
 
     total_credits = [sum(s.credits[i] for s in suite_summaries) for i in range(n)]
+    total_durations = [sum(s.durations[i] for s in suite_summaries) for i in range(n)]
 
-    # Per-run win counts (cases where this run has the highest score)
     win_counts = [0] * n
     tie_count = 0
     for r in scored:
@@ -439,49 +529,70 @@ def generate_multi_html(
         elif len(winners) > 1:
             tie_count += 1
 
+    # --- Compute aggregates for FILTERED rows (fully-scored only) ---
+    by_suite_filtered: dict[str, list[SimpleNamespace]] = defaultdict(list)
+    for r in scored:
+        by_suite_filtered[r.exp_name].append(r)
+
+    # Per-model suite summaries (all view: each model scored over its own quality cases)
+    all_suite_by_name: dict[str, SimpleNamespace] = {}
+    for s in suite_summaries:
+        all_suite_by_name[s.name] = s
+
+    filtered_suite_summaries: list[SimpleNamespace] = []
+    for exp_name, suite_rows in by_suite_filtered.items():
+        f_means = [sum(r.vals[i] for r in suite_rows) / len(suite_rows) for i in range(n)]
+        f_credits = [sum(r.credits[i] for r in suite_rows) for i in range(n)]
+        f_durations = [sum(r.durations[i] for r in suite_rows) for i in range(n)]
+        filtered_suite_summaries.append(SimpleNamespace(
+            name=exp_name, means=f_means, n=len(suite_rows),
+            credits=f_credits, durations=f_durations,
+            exp_ids=suite_rows[0].exp_ids,
+        ))
+    filtered_suite_summaries.sort(key=lambda s: s.name)
+
+    # "All" view: recompute per-suite means per-model (not just fully-scored)
+    by_suite_all: dict[str, list[SimpleNamespace]] = defaultdict(list)
+    for r in rows:
+        by_suite_all[r.exp_name].append(r)
+    all_suite_summaries: list[SimpleNamespace] = []
+    for exp_name, suite_rows in by_suite_all.items():
+        a_means = []
+        a_credits = [0.0] * n
+        a_durations = [0.0] * n
+        for i in range(n):
+            vals_i = [r.vals[i] for r in suite_rows if r.vals[i] is not None]
+            a_means.append(sum(vals_i) / len(vals_i) if vals_i else 0)
+            a_credits[i] = sum(r.credits[i] for r in suite_rows)
+            a_durations[i] = sum(r.durations[i] for r in suite_rows)
+        all_suite_summaries.append(SimpleNamespace(
+            name=exp_name, means=a_means, n=len(suite_rows),
+            credits=a_credits, durations=a_durations,
+            exp_ids=suite_rows[0].exp_ids,
+        ))
+    all_suite_summaries.sort(key=lambda s: s.name)
+
+    f_total_credits = [sum(s.credits[i] for s in filtered_suite_summaries) for i in range(n)]
+    f_total_durations = [sum(s.durations[i] for s in filtered_suite_summaries) for i in range(n)]
+
     parts: list[str] = []
     parts.append(_HTML_HEAD)
 
     # Title
     parts.append(f"<h1>Multi-Run Eval Report: {n} runs compared</h1>")
     parts.append(f'<p class="meta">Score: <code>{_esc(score)}</code> \u00b7 '
-                 f"Compared {total} cases across {len(suite_summaries)} suites \u00b7 "
+                 f"Compared {total_cases} cases across {len(suite_summaries)} suites "
+                 f"({total} fully scored, {total_cases - total} with infra-failure gaps) \u00b7 "
                  f"Baseline: <code>{_esc(bl)}</code></p>")
 
-    # Summary line: mean score for each run
-    parts.append('<div class="summary-line">')
-    for i in range(n):
-        delta = overall_means[i] - overall_means[baseline_idx] if i != baseline_idx else None
-        color = _delta_color(delta) if delta is not None else "neutral"
-        parts.append(f'<span class="num {color}">{overall_means[i]:.3f}</span> <span class="label">{_esc(labels[i])}'
-                     + (f' ({_fmt_pp(delta)})' if delta is not None else '') + '</span>')
-        if i < n - 1:
-            parts.append(' \u00b7 ')
-    parts.append('</div>')
+    # --- Toggle (affects all aggregated sections) ---
+    parts.append('<div id="filter-toggle" style="margin:0.5rem 0 1rem 0"><label class="meta" style="cursor:pointer">'
+                 '<input type="checkbox" id="filter-fullscore" onchange="toggleFullScoreFilter()" style="margin-right:0.3rem"/>'
+                 '<strong>Show only fully-scored cases</strong> (all models have quality data — '
+                 f'{total} of {total_cases} cases)'
+                 '</label></div>')
 
-    # Credits summary
-    parts.append('<div class="summary-line" style="margin-top:0.5rem">')
-    parts.append('<span class="label">Credits:</span>')
-    for i in range(n):
-        delta_c = total_credits[i] - total_credits[baseline_idx] if i != baseline_idx else None
-        color = _delta_color(-delta_c) if delta_c is not None else "neutral"
-        parts.append(f'<span class="num {color}">{total_credits[i]:.4f}</span> <span class="label">{_esc(labels[i])}'
-                     + (f' ({delta_c:+.4f})' if delta_c is not None else '') + '</span>')
-        if i < n - 1:
-            parts.append(' \u00b7 ')
-    parts.append('</div>')
-
-    # Win counts
-    parts.append('<div class="summary-line" style="margin-top:0.5rem">')
-    parts.append('<span class="label">Win counts (highest score per case):</span>')
-    for i in range(n):
-        parts.append(f'<span class="num green">{win_counts[i]}</span> <span class="label">{_esc(labels[i])}</span>')
-        if i < n - 1:
-            parts.append(' \u00b7 ')
-    if tie_count:
-        parts.append(f' \u00b7 <span class="num neutral">{tie_count}</span> <span class="label">ties</span>')
-    parts.append(f' \u00b7 <span class="label">{total} total scored cases</span>')
-    parts.append('</div>')
+    # --- Summary lines removed: mean/credits/time/wins/support are all in the rankings table ---
 
     # Controls
     parts.append('<div class="controls">')
@@ -489,10 +600,14 @@ def generate_multi_html(
     parts.append('<button class="btn" onclick="toggleAll(false)">Collapse all</button>')
     parts.append('</div>')
 
-    # Only-in sets
-    for i in range(n):
-        if only_sets[i]:
-            parts.append(f'<p class="meta"><strong>Only in {_esc(labels[i])}:</strong> {", ".join(sorted(only_sets[i]))}</p>')
+    # Run info (only-in sets, collapsed)
+    has_only = any(only_sets[i] for i in range(n))
+    if has_only:
+        parts.append('<details id="run-info"><summary class="meta">Run info</summary>')
+        for i in range(n):
+            if only_sets[i]:
+                parts.append(f'<p class="meta"><strong>Only in {_esc(labels[i])}:</strong> {", ".join(sorted(only_sets[i]))}</p>')
+        parts.append('</details>')
 
     # Insights section (open by default, author-written)
     if insights_html:
@@ -501,25 +616,38 @@ def generate_multi_html(
         parts.append(f'<div class="insights">{insights_html}</div>')
         parts.append('</details>')
 
-    # --- Ranking table ---
-    parts.append('<h2 id="rankings">Overall Rankings</h2>')
-    ranked = sorted(range(n), key=lambda i: -overall_means[i])
-    parts.append('<table class="rank-table"><thead><tr><th>Rank</th><th>Run</th><th>Mean Score</th><th>Credits</th><th>Wins</th>')
-    for i in range(n):
-        if i != baseline_idx:
-            parts.append(f'<th>\u0394 vs {_esc(labels[i])}</th>')
-    parts.append('</tr></thead><tbody>')
-    for rank, idx in enumerate(ranked, 1):
-        parts.append(f'<tr class="rank-{rank}"><td>{rank}</td><td>{_esc(labels[idx])}</td>'
-                     f'<td class="num-cell">{overall_means[idx]:.3f}</td>'
-                     f'<td class="num-cell">{total_credits[idx]:.4f}</td>'
-                     f'<td class="num-cell">{win_counts[idx]}</td>')
+    # --- Ranking table (dual: view-all and view-filtered) ---
+    def _rankings_table(means, credits, durations, cases_counts, case_total):
+        ranked = sorted(range(n), key=lambda i: -means[i])
+        p = ['<table class="rank-table"><thead><tr><th>Rank</th><th>Run</th><th>Mean Score</th><th>Cases</th><th>Credits</th><th>Time</th>'
+             f'<th title="Wins among {case_total} fully-scored cases (fair comparison only)">Wins</th>']
         for i in range(n):
             if i != baseline_idx:
-                d = overall_means[idx] - overall_means[i]
-                parts.append(f'<td class="num-cell {_delta_color(d)}">{_fmt_pp(d)}</td>')
-        parts.append('</tr>')
-    parts.append('</tbody></table>')
+                p.append(f'<th>\u0394 vs {_esc(labels[i])}</th>')
+        p.append('</tr></thead><tbody>')
+        for rank, idx in enumerate(ranked, 1):
+            p.append(f'<tr class="rank-{rank}"><td>{rank}</td><td>{_esc(labels[idx])}</td>'
+                     f'<td class="num-cell">{means[idx]:.3f}</td>'
+                     f'<td class="num-cell">{cases_counts[idx]}/{case_total}</td>'
+                     f'<td class="num-cell">{credits[idx]:.4f}</td>'
+                     f'<td class="num-cell">{_fmt_duration(durations[idx])}</td>'
+                     f'<td class="num-cell" title="{win_counts[idx]} wins among {case_total} fully-scored cases">{win_counts[idx]}</td>')
+            for i in range(n):
+                if i != baseline_idx:
+                    d = means[idx] - means[i]
+                    p.append(f'<td class="num-cell {_delta_color(d)}">{_fmt_pp(d)}</td>')
+            p.append('</tr>')
+        p.append('</tbody></table>')
+        return "".join(p)
+
+    parts.append('<h2 id="rankings">Overall Rankings</h2>')
+    parts.append('<div class="view-all">')
+    parts.append(_rankings_table(all_means, total_credits, total_durations, support_counts, total_cases))
+    parts.append('</div>')
+    parts.append('<div class="view-filtered" style="display:none">')
+    f_support = [total] * n  # all fully-scored
+    parts.append(_rankings_table(overall_means, f_total_credits, f_total_durations, f_support, total))
+    parts.append('</div>')
 
     # --- Tabbed section: Suite Deltas | Credits | Cases ---
     parts.append('<h2 id="suite-breakdown">Suite Breakdown</h2>')
@@ -528,69 +656,121 @@ def generate_multi_html(
     parts.append('<label for="rt-deltas">Suite Deltas</label>')
     parts.append('<input type="radio" name="suite-tabs" id="rt-credits" onchange="switchTab(\'credits\')"/>')
     parts.append('<label for="rt-credits">Credits</label>')
+    parts.append('<input type="radio" name="suite-tabs" id="rt-time" onchange="switchTab(\'time\')"/>')
+    parts.append('<label for="rt-time">Time</label>')
     parts.append('<input type="radio" name="suite-tabs" id="rt-cases" onchange="switchTab(\'cases\')"/>')
     parts.append('<label for="rt-cases">Case-by-Case</label>')
     parts.append('</div>')
 
-    # --- Tab 1: Suite Deltas ---
-    parts.append('<div class="tab-panel active" id="tab-deltas">')
-    parts.append('<table class="multi-table"><thead><tr><th class="sortable" data-col="0" onclick="sortSuites(0)">Suite</th>')
-    for i in range(n):
-        parts.append(f'<th class="sortable" data-col="{i+1}" onclick="sortSuites({i+1})">{_esc(labels[i])}</th>')
-    for i in range(n):
-        if i != baseline_idx:
-            parts.append(f'<th class="sortable" data-col="{n+i}" onclick="sortSuites({n+i})">\u0394 ({_esc(labels[i])})</th>')
-    parts.append('</tr></thead><tbody>')
-    for s in sorted(suite_summaries, key=lambda s: -s.means[baseline_idx]):
-        sort_vals = [s.name]
-        sort_vals += [f"{s.means[i]:.6f}" for i in range(n)]
-        sort_vals += [f"{s.means[i] - s.means[baseline_idx]:.6f}" for i in range(n) if i != baseline_idx]
-        sort_attrs = " ".join(f'data-sort-{i}="{v}"' for i, v in enumerate(sort_vals))
-        parts.append(f'<tr {sort_attrs}><td>{_esc(s.name)}</td>')
+    # --- Tab 1: Suite Deltas (dual) ---
+    def _suite_deltas_table(summaries, o_means):
+        p = ['<table class="multi-table"><thead><tr><th class="sortable" data-col="0" onclick="sortSuites(0)">Suite</th>']
         for i in range(n):
-            parts.append(f'<td class="num-cell">{_fmt_score(s.means[i])}</td>')
+            p.append(f'<th class="sortable" data-col="{i+1}" onclick="sortSuites({i+1})">{_esc(labels[i])}</th>')
         for i in range(n):
             if i != baseline_idx:
-                d = s.means[i] - s.means[baseline_idx]
-                parts.append(f'<td class="num-cell {_delta_color(d)}">{_fmt_pp(d)}</td>')
-        parts.append('</tr>')
-    parts.append(f'<tr class="totals"><td>Overall</td>')
-    for i in range(n):
-        parts.append(f'<td class="num-cell">{overall_means[i]:.3f}</td>')
-    for i in range(n):
-        if i != baseline_idx:
-            d = overall_means[i] - overall_means[baseline_idx]
-            parts.append(f'<td class="num-cell {_delta_color(d)}">{_fmt_pp(d)}</td>')
-    parts.append('</tr></tbody></table>')
-    parts.append('</div>')
-
-    # --- Tab 2: Credits ---
-    parts.append('<div class="tab-panel" id="tab-credits">')
-    parts.append('<table class="cost-table"><thead><tr><th class="sortable" data-col="0" onclick="sortSuites(0)">Suite</th>')
-    for i in range(n):
-        parts.append(f'<th class="sortable" data-col="{i+1}" onclick="sortSuites({i+1})">{_esc(labels[i])}</th>')
-    parts.append('</tr></thead><tbody>')
-    for s in sorted(suite_summaries, key=lambda s: -sum(s.credits)):
-        sort_vals = [s.name] + [f"{s.credits[i]:.8f}" for i in range(n)]
-        sort_attrs = " ".join(f'data-sort-{i}="{v}"' for i, v in enumerate(sort_vals))
-        parts.append(f'<tr {sort_attrs}><td>{_esc(s.name)}</td>')
+                p.append(f'<th class="sortable" data-col="{n+i}" onclick="sortSuites({n+i})">\u0394 ({_esc(labels[i])})</th>')
+        p.append('</tr></thead><tbody>')
+        for s in sorted(summaries, key=lambda s: -s.means[baseline_idx]):
+            sort_vals = [s.name]
+            sort_vals += [f"{s.means[i]:.6f}" for i in range(n)]
+            sort_vals += [f"{s.means[i] - s.means[baseline_idx]:.6f}" for i in range(n) if i != baseline_idx]
+            sort_attrs = " ".join(f'data-sort-{i}="{v}"' for i, v in enumerate(sort_vals))
+            p.append(f'<tr {sort_attrs}><td>{_esc(s.name)}</td>')
+            for i in range(n):
+                p.append(f'<td class="num-cell">{_fmt_score(s.means[i])}</td>')
+            for i in range(n):
+                if i != baseline_idx:
+                    d = s.means[i] - s.means[baseline_idx]
+                    p.append(f'<td class="num-cell {_delta_color(d)}">{_fmt_pp(d)}</td>')
+            p.append('</tr>')
+        p.append('<tr class="totals"><td>Overall</td>')
         for i in range(n):
-            parts.append(f'<td class="num-cell">{s.credits[i]:.4f}</td>')
-        parts.append('</tr>')
-    parts.append(f'<tr class="totals"><td>Total</td>')
-    for i in range(n):
-        parts.append(f'<td class="num-cell">{total_credits[i]:.4f}</td>')
-    parts.append('</tr></tbody></table>')
+            p.append(f'<td class="num-cell">{o_means[i]:.3f}</td>')
+        for i in range(n):
+            if i != baseline_idx:
+                d = o_means[i] - o_means[baseline_idx]
+                p.append(f'<td class="num-cell {_delta_color(d)}">{_fmt_pp(d)}</td>')
+        p.append('</tr></tbody></table>')
+        return "".join(p)
+
+    parts.append('<div class="tab-panel active" id="tab-deltas">')
+    parts.append('<div class="view-all">')
+    parts.append(_suite_deltas_table(all_suite_summaries, all_means))
+    parts.append('</div>')
+    parts.append('<div class="view-filtered" style="display:none">')
+    parts.append(_suite_deltas_table(filtered_suite_summaries, overall_means))
+    parts.append('</div>')
     parts.append('</div>')
 
-    # --- Tab 3: Case-by-Case ---
+    # --- Tab 2: Credits (dual) ---
+    def _credits_table(summaries, t_credits):
+        p = ['<table class="cost-table"><thead><tr><th class="sortable" data-col="0" onclick="sortSuites(0)">Suite</th>']
+        for i in range(n):
+            p.append(f'<th class="sortable" data-col="{i+1}" onclick="sortSuites({i+1})">{_esc(labels[i])}</th>')
+        p.append('</tr></thead><tbody>')
+        for s in sorted(summaries, key=lambda s: -sum(s.credits)):
+            sort_vals = [s.name] + [f"{s.credits[i]:.8f}" for i in range(n)]
+            sort_attrs = " ".join(f'data-sort-{i}="{v}"' for i, v in enumerate(sort_vals))
+            p.append(f'<tr {sort_attrs}><td>{_esc(s.name)}</td>')
+            for i in range(n):
+                p.append(f'<td class="num-cell">{s.credits[i]:.4f}</td>')
+            p.append('</tr>')
+        p.append('<tr class="totals"><td>Total</td>')
+        for i in range(n):
+            p.append(f'<td class="num-cell">{t_credits[i]:.4f}</td>')
+        p.append('</tr></tbody></table>')
+        return "".join(p)
+
+    parts.append('<div class="tab-panel" id="tab-credits">')
+    parts.append('<div class="view-all">')
+    parts.append(_credits_table(all_suite_summaries, total_credits))
+    parts.append('</div>')
+    parts.append('<div class="view-filtered" style="display:none">')
+    parts.append(_credits_table(filtered_suite_summaries, f_total_credits))
+    parts.append('</div>')
+    parts.append('</div>')
+
+    # --- Tab 3: Time (dual) ---
+    def _time_table(summaries, t_durations):
+        p = ['<table class="cost-table"><thead><tr><th class="sortable" data-col="0" onclick="sortSuites(0)">Suite</th>']
+        for i in range(n):
+            p.append(f'<th class="sortable" data-col="{i+1}" onclick="sortSuites({i+1})">{_esc(labels[i])}</th>')
+        p.append('</tr></thead><tbody>')
+        for s in sorted(summaries, key=lambda s: -sum(s.durations)):
+            sort_vals = [s.name] + [f"{s.durations[i]:.8f}" for i in range(n)]
+            sort_attrs = " ".join(f'data-sort-{i}="{v}"' for i, v in enumerate(sort_vals))
+            p.append(f'<tr {sort_attrs}><td>{_esc(s.name)}</td>')
+            for i in range(n):
+                p.append(f'<td class="num-cell">{_fmt_duration(s.durations[i])}</td>')
+            p.append('</tr>')
+        p.append('<tr class="totals"><td>Total</td>')
+        for i in range(n):
+            p.append(f'<td class="num-cell">{_fmt_duration(t_durations[i])}</td>')
+        p.append('</tr></tbody></table>')
+        return "".join(p)
+
+    parts.append('<div class="tab-panel" id="tab-time">')
+    parts.append('<div class="view-all">')
+    parts.append(_time_table(all_suite_summaries, total_durations))
+    parts.append('</div>')
+    parts.append('<div class="view-filtered" style="display:none">')
+    parts.append(_time_table(filtered_suite_summaries, f_total_durations))
+    parts.append('</div>')
+    parts.append('</div>')
+
+    # --- Tab 4: Case-by-Case ---
     by_suite: dict[str, list[SimpleNamespace]] = defaultdict(list)
     for r in rows:
         by_suite[r.exp_name].append(r)
 
+    # Build filtered suite summary lookup for case-by-case headers
+    filtered_by_name = {s.name: s for s in filtered_suite_summaries}
+    all_by_name = {s.name: s for s in all_suite_summaries}
+
     parts.append('<div class="tab-panel" id="tab-cases">')
     parts.append('<div class="cases-container">')
-    for s in sorted(suite_summaries, key=lambda s: -s.means[baseline_idx]):
+    for s in sorted(all_suite_summaries, key=lambda s: -s.means[baseline_idx]):
         suite_rows = by_suite.get(s.name, [])
         suite_id = f"suite-{s.name}".replace(" ", "-").replace("/", "-").replace(".", "-").lower()
         bl_mean = s.means[baseline_idx]
@@ -602,14 +782,28 @@ def generate_multi_html(
         sort_attrs = " ".join(f'data-sort-{i}="{v}"' for i, v in enumerate(sort_vals))
 
         parts.append(f'<details class="{suite_class}" id="{suite_id}" {sort_attrs}>')
-        parts.append(f'<summary>{_esc(s.name)} \u00b7 '
-                     + " / ".join(f"{_fmt_score(m)}" for m in s.means) +
-                     f' \u00b7 {len(suite_rows)} cases</summary>')
+
+        # Dual summary: view-all and view-filtered inside one <summary>
+        fs = filtered_by_name.get(s.name)
+        aS = all_by_name.get(s.name, s)
+        def _case_summary(summ, case_count):
+            return (f'{_esc(summ.name)} \u00b7 '
+                    + " / ".join(f"{_fmt_score(m)}" for m in summ.means) +
+                    f' \u00b7 {case_count} cases \u00b7 '
+                    + " / ".join(_fmt_duration(d) for d in summ.durations))
+
+        parts.append(f'<summary>'
+                     f'<span class="view-all">{_case_summary(aS, len(suite_rows))}</span>')
+        if fs:
+            fs_rows = sum(1 for r in suite_rows if all(v is not None for v in r.vals))
+            parts.append(f'<span class="view-filtered" style="display:none">{_case_summary(fs, fs_rows)}</span>')
+        parts.append('</summary>')
 
         for r in sorted(suite_rows, key=lambda r: -(max(r.vals) - min(r.vals) if all(v is not None for v in r.vals) else 0)):
             case_id = f"case-{s.name}-{r.case_name}".replace(" ", "-").replace("/", "-").replace(".", "-").lower()
             max_val = max(v for v in r.vals if v is not None) if any(v is not None for v in r.vals) else None
-            parts.append(f'<details class="case-card" id="{case_id}">')
+            all_scored = all(v is not None for v in r.vals)
+            parts.append(f'<details class="case-card{" fullscore" if all_scored else ""}" id="{case_id}">')
 
             # Summary line with badges
             score_strs = []
@@ -637,9 +831,10 @@ def generate_multi_html(
                     parts.append('</tr>')
                 parts.append('</tbody></table>')
 
-            # Credits
+            # Credits + Time
             credits_str = " / ".join(f"{r.credits[i]:.4f}" for i in range(n))
-            parts.append(f'<p class="meta">Credits: {credits_str}</p>')
+            time_str = " / ".join(_fmt_duration(r.durations[i]) for i in range(n))
+            parts.append(f'<p class="meta">Credits: {credits_str} \u00b7 Time: {time_str}</p>')
 
             # Reasons
             has_reasons = any(r.reasons[i] for i in range(n))
@@ -796,10 +991,6 @@ def main() -> None:
             m = sum(r.vals[i] for r in scored) / len(scored)
             print(f"  {labels[i]}: mean={m:.3f}")
         print(f"  {len(scored)} matched cases across {len(suite_summaries)} suites")
-
-    for i in range(n):
-        if only_sets[i]:
-            print(f"  Only in {labels[i]}: {', '.join(sorted(only_sets[i]))}")
 
     print(f"\nGenerating HTML report...")
     insights_html = ""

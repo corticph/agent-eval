@@ -400,6 +400,9 @@ def _handle_show(args: argparse.Namespace) -> int:
 def _handle_sweep(args: argparse.Namespace) -> int:
     """Delegate to the sweep script."""
     from .scripts.sweep import run_sweep
+    extra = list(args.extra) if args.extra else None
+    if extra and extra[0] == "--":
+        extra = extra[1:]
     return run_sweep(
         env=args.env,
         evals_dir=args.evals_dir,
@@ -410,7 +413,7 @@ def _handle_sweep(args: argparse.Namespace) -> int:
         resume=args.resume,
         resume_file=args.resume_file,
         model=args.model,
-        extra_args=list(args.extra) if args.extra else None,
+        extra_args=extra,
         verbose=getattr(args, "verbose", 0),
         use_opik=not getattr(args, "no_opik", False),
     )
