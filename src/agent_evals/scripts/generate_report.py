@@ -468,6 +468,8 @@ a[href^="#"]:hover { text-decoration: underline; }
 .tab-panel.active { display: block; }
 .rca-panel { display: none; }
 .rca-panel.active { display: block; }
+.imp-panel { display: none; }
+.imp-panel.active { display: block; }
 .sortable { cursor: pointer; user-select: none; }
 .sortable:hover { color: var(--text); }
 .sortable::after { content: ""; font-size: 0.75rem; margin-left: 0.2rem; opacity: 0.4; }
@@ -573,6 +575,17 @@ function switchRcaTab(idx) {
   var label = document.querySelector('label[for="rca-rt-' + idx + '"]');
   if (label) { label.style.color = "var(--text)"; label.style.fontWeight = "700"; }
 }
+function switchImpTab(idx) {
+  document.querySelectorAll(".imp-panel").forEach(function(p) { p.classList.remove("active"); });
+  document.querySelectorAll('input[name="imp-tabs"]').forEach(function(l) { l.checked = false; });
+  document.querySelectorAll('.imp-tab-label').forEach(function(l) { l.style.color = ""; l.style.fontWeight = ""; });
+  var panel = document.getElementById("imp-panel-" + idx);
+  if (panel) panel.classList.add("active");
+  var radio = document.getElementById("imp-rt-" + idx);
+  if (radio) radio.checked = true;
+  var label = document.querySelector('label[for="imp-rt-' + idx + '"]');
+  if (label) { label.style.color = "var(--text)"; label.style.fontWeight = "700"; }
+}
 
 function openAnchorTarget(id) {
   var el = document.getElementById(id);
@@ -592,6 +605,11 @@ function openAnchorTarget(id) {
   if (rcaPanel) {
     var rcaIdx = rcaPanel.id.replace("rca-panel-", "");
     switchRcaTab(rcaIdx);
+  }
+  var impPanel = el.closest(".imp-panel");
+  if (impPanel) {
+    var impIdx = impPanel.id.replace("imp-panel-", "");
+    switchImpTab(impIdx);
   }
   el.scrollIntoView({behavior: "smooth", block: "start"});
   return true;
@@ -1016,19 +1034,46 @@ def generate_report_html(
             parts.append('</details>')
         parts.append('</div>')
 
-    # --- Improvements ---
-    improvement_rows = [r for r in rows if _is_improvement(r, bl)]
-    improvement_rows.sort(key=lambda r: _best_delta(r, bl) or 0, reverse=True)
-    if improvement_rows:
-        parts.append('<h2 id="improvements">Improvements</h2>')
-        parts.append(f'<p class="meta">{len(improvement_rows)} cases improved:</p>')
-        parts.append('<details class="root-cause" id="all-improvements"><summary><span class="badge green">'
-                     f'{len(improvement_rows)}</span> All improvements</summary>')
-        for r in improvement_rows:
-            imp_id = f"imp-{_slug(r.case_name)}"
-            bd = _best_delta(r, bl)
-            _render_case_card(parts, r, labels, bl, imp_id, badge_delta=bd, suite_name=r.exp_name)
-        parts.append('</details>')
+    # --- Improvements (per non-baseline run) ---
+    parts.append('<h2 id="improvements">Improvements</h2>')
+
+    # Build per-run improvement data
+    imp_data: list[tuple[int, list[SimpleNamespace]]] = []
+    for i in non_bl_indices:
+        run_imp_rows = [
+            r for r in rows
+            if r.vals[i] is not None and r.vals[bl] is not None
+            and r.vals[i] > r.vals[bl] + 0.001
+        ]
+        run_imp_rows.sort(key=lambda r: r.vals[i] - r.vals[bl], reverse=True)
+        imp_data.append((i, run_imp_rows))
+
+    has_improvements = any(len(rows_i) > 0 for _, rows_i in imp_data)
+    if has_improvements:
+        # Tab bar (only if 2+ non-baseline runs)
+        if len(non_bl_indices) > 1:
+            parts.append('<div class="tab-bar">')
+            for idx, i in enumerate(non_bl_indices):
+                imp_count = len(imp_data[idx][1])
+                is_first = idx == 0
+                parts.append(f'<input type="radio" name="imp-tabs" id="imp-rt-{i}"'
+                             f'{" checked" if is_first else ""} onchange="switchImpTab({i})"/>')
+                parts.append(f'<label for="imp-rt-{i}" class="imp-tab-label">'
+                             f'{_esc(labels[i])} ({imp_count} improved)</label>')
+            parts.append('</div>')
+
+        for idx, (i, run_imp_rows) in enumerate(imp_data):
+            active = " active" if (len(non_bl_indices) == 1 or idx == 0) else ""
+            parts.append(f'<div class="imp-panel{active}" id="imp-panel-{i}">')
+            parts.append(f'<p class="meta">{len(run_imp_rows)} cases improved for {_esc(labels[i])} vs {_esc(labels[bl])}:</p>')
+            parts.append('<details class="root-cause" id="all-improvements"><summary><span class="badge green">'
+                         f'{len(run_imp_rows)}</span> All improvements</details>')
+            for r in run_imp_rows:
+                imp_id = f"imp-{i}-{_slug(r.case_name)}"
+                delta = r.vals[i] - r.vals[bl]
+                _render_case_card(parts, r, labels, bl, imp_id, badge_delta=delta, suite_name=r.exp_name)
+            parts.append('</details>')
+            parts.append('</div>')
 
     # --- Tabbed section: Suite Deltas | Credits | Time | Case-by-Case ---
     parts.append('<h2 id="suite-breakdown">Suite Breakdown</h2>')
