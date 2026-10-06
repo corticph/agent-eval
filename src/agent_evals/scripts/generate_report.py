@@ -948,13 +948,16 @@ def generate_report_html(
         parts.append(f'<div class="insights">{insights_html}</div>')
         parts.append('</details>')
 
-    # --- Run differences ---
-    for i in range(n):
-        if i < len(run_differences_list) and run_differences_list[i]:
-            parts.append(f'<details open id="run-diff-{i}">')
-            parts.append(f'<summary><strong>Run Differences: {_esc(labels[i])}</strong></summary>')
-            parts.append(f'<div class="run-diff">{run_differences_list[i]}</div>')
-            parts.append('</details>')
+    # --- Run info (collapsible, one section with per-run sub-headings) ---
+    has_run_info = any(i < len(run_differences_list) and run_differences_list[i] for i in range(n))
+    if has_run_info:
+        parts.append('<details open id="run-info">')
+        parts.append('<summary><strong>Run Info</strong></summary>')
+        for i in range(n):
+            if i < len(run_differences_list) and run_differences_list[i]:
+                parts.append(f'<h3>{_esc(labels[i])}</h3>')
+                parts.append(f'<div class="run-diff">{run_differences_list[i]}</div>')
+        parts.append('</details>')
 
     # --- Rankings table ---
     def _rankings_table(means, credits, durations, cases_counts, case_total):
@@ -1307,13 +1310,8 @@ def _add_insights_to_report(report_path: Path, insights_html: str) -> None:
     pattern = r'<details open id="insights">.*?</details>'
     if re.search(pattern, content, re.DOTALL):
         content = re.sub(pattern, insights_block, content, count=1, flags=re.DOTALL)
-    elif re.search(r'<details open id="run-diff-\d+">', content):
-        content = re.sub(
-            r'(<details open id="run-diff-\d+">)',
-            insights_block + '\n\n    \\1',
-            content,
-            count=1,
-        )
+    elif '<details open id="run-info">' in content:
+        content = content.replace('<details open id="run-info">', insights_block + '\n\n    <details open id="run-info">', 1)
     elif '<h2 id="rankings">' in content:
         content = content.replace('<h2 id="rankings">', insights_block + '\n\n    <h2 id="rankings">', 1)
     else:
@@ -1367,8 +1365,9 @@ def main() -> None:
         help="Path to an HTML file with author-written insights (optional).",
     )
     gen.add_argument(
-        "--run-differences", action="append", default=[],
-        help="Path to an HTML file with run-specific context (repeatable, one per --tag group).",
+        "--run-info", action="append", default=[],
+        help="HTML file with run-specific context (one per run, same order as --tag/--label). "
+             "Example: --tag A --label \"run A\" --run-info a.html",
     )
 
     add = subparsers.add_parser("add-insights", help="Inject author-written insights into an existing report")
@@ -1407,17 +1406,21 @@ def main() -> None:
     labels = args.label
     tags_list = args.tag
 
-    # Load run-differences files
+    # Load run-info files (pair by position with --tag/--label groups)
     run_differences_list: list[str] = []
-    rd_files = args.run_differences or []
+    rd_files = args.run_info or []
     if len(rd_files) > n:
-        parser.error(f"Got {len(rd_files)} --run-differences files but only {n} runs.")
+        parser.error(
+            f"Got {len(rd_files)} --run-info files but only {n} runs. "
+            f"Files pair by position with --tag/--label groups:\n"
+            + "\n".join(f"  {i}: {labels[i]}" for i in range(n))
+        )
     for f in rd_files[:n]:
         p = Path(f)
         if p.exists():
             run_differences_list.append(p.read_text(encoding="utf-8"))
         else:
-            print(f"Warning: run-differences file not found: {f}", file=sys.stderr)
+            print(f"Warning: run-info file not found: {f}", file=sys.stderr)
             run_differences_list.append("")
     while len(run_differences_list) < n:
         run_differences_list.append("")

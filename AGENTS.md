@@ -490,8 +490,11 @@ Key flags:
 - `--source` — `opik` (default, local-cache-first) or `local`.
 - `--results-dir` — path to results directory for local source (repeatable, default: `results/`).
 - `--insights` — path to an HTML file with author-written analysis.
-- `--run-differences` — repeatable, one file per run; extra context
-  describing what changed in that run (replaces the old `--beta-context`).
+- `--run-info` — one HTML file per run, paired by position with `--tag`/`--label`
+  groups. Placed inline after each `--label`. Renders as a "Run Info" section
+  with per-run sub-headings. Example:
+  `--tag A --label "run A" --run-info a.html --tag B --label "run B" --run-info b.html`
+  Runs without `--run-info` get no section.
 - `--score` — feedback score to compare (default: `overall`).
 
 The report has tabbed suite breakdown (Suite Deltas / Credits / Case-by-Case)

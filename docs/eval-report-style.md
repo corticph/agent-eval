@@ -35,9 +35,9 @@ The `generate` subcommand accepts multiple `--tag` groups (one per run);
 each `--tag` can also take multiple values, and experiments from multiple
 tags are merged with the newest per suite name winning. This lets you
 combine a full sweep with a partial re-run (e.g. re-running a subset of
-evals after a branch change). Use `--run-differences` to attach per-run
-HTML context files (repeatable, one per `--tag`/`--label` group, paired
-by position).
+evals after a branch change). Use `--run-info` to attach per-run
+  HTML context files (one per `--tag`/`--label` group, paired by position).
+  Example: `--tag A --label "run A" --run-info a.html`
 
 The `add-insights` subcommand injects (or replaces) the insights
 `<details>` block in an existing report. It looks for
@@ -88,8 +88,7 @@ inserts before the run-diff section.
   - Improvements: `id="imp-{case_name}"`
   - Suites: `id="suite-{suite_name}"`
   - Cases within suites: `id="case-{suite_name}-{case_name}"`
-  - Run differences: `id="run-diff-{idx}"` (0-based, one per run with a
-    `--run-differences` file)
+  - Run info: `id="run-info"` (single collapsible with per-run `<h3>` sub-headings)
   - Major sections: `id="rankings"`, `id="root-cause-analysis"`,
     `id="improvements"`, `id="suite-breakdown"`, `id="insights"`
 - IDs are slugified: spaces → `-`, `/` → `-`, `.` → `-`, lowercased.
