@@ -74,7 +74,18 @@ CATEGORIES: list[dict] = [
             "The agent completed the task instead of staying in input-required state. "
             "This may indicate a change in the orchestrator's completion signalling."
         ),
-        "all": ["input-required", "completed"],
+        "all": ["input-required", "received", "task_state_completed"],
+    },
+    {
+        "key": "stuck-input-required",
+        "title": "Agent bug: Failed to complete task (stuck in input-required)",
+        "color": "red",
+        "description": (
+            "The agent stayed in input-required state when the eval expected it "
+            "to complete. The agent may not have gathered enough information to "
+            "proceed, or the completion condition was never met."
+        ),
+        "all": ["expected status", "task_state_input_required"],
     },
     {
         "key": "forbidden-phrase",
@@ -126,6 +137,17 @@ CATEGORIES: list[dict] = [
             "infrastructure issue, not an agent bug or eval correctness issue."
         ),
         "any": ["judge returned empty"],
+    },
+    {
+        "key": "wrong-values",
+        "title": "Agent bug: Wrong or extra values in response",
+        "color": "red",
+        "description": (
+            "The agent returned wrong or extra values in its response — e.g., "
+            "matched ['CLINICAL_PROBLEMS', 'ALERT'] when only 'CLINICAL_PROBLEMS' "
+            "was expected, or returned empty results for a required field."
+        ),
+        "any": ["expected every value ==", "matched [], expected"],
     },
     {
         "key": "clinical-content",
