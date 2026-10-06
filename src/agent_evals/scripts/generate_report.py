@@ -935,7 +935,7 @@ def generate_report_html(
     # --- Only-in sets ---
     has_only = any(only_sets[i] for i in range(n))
     if has_only:
-        parts.append('<details id="run-info"><summary class="meta">Run info</summary>')
+        parts.append('<details id="only-in"><summary class="meta">Run info</summary>')
         for i in range(n):
             if only_sets[i]:
                 parts.append(f'<p class="meta"><strong>Only in {_esc(labels[i])}:</strong> {", ".join(sorted(only_sets[i]))}</p>')

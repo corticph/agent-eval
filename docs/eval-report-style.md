@@ -42,7 +42,7 @@ evals after a branch change). Use `--run-info` to attach per-run
 The `add-insights` subcommand injects (or replaces) the insights
 `<details>` block in an existing report. It looks for
 `<details open id="insights">` and replaces its content; if not found,
-inserts before the run-diff section.
+inserts before the run-info section.
 
 ### Script is the source of truth
 
@@ -89,6 +89,7 @@ inserts before the run-diff section.
   - Suites: `id="suite-{suite_name}"`
   - Cases within suites: `id="case-{suite_name}-{case_name}"`
   - Run info: `id="run-info"` (single collapsible with per-run `<h3>` sub-headings)
+  - Only-in sets: `id="only-in"` (collapsed, shows suites missing from some runs)
   - Major sections: `id="rankings"`, `id="root-cause-analysis"`,
     `id="improvements"`, `id="suite-breakdown"`, `id="insights"`
 - IDs are slugified: spaces → `-`, `/` → `-`, `.` → `-`, lowercased.
@@ -100,7 +101,7 @@ inserts before the run-diff section.
 ## Insights section
 
 - The insights section is a `<details open id="insights">` block, inserted
-  after the controls and before the run-diff sections.
+  after the controls and before the run-info section.
 - Insights are **author-written HTML** (not auto-generated), injected
   via the `add-insights` subcommand after the report is generated.
 - Format insights with **generous spacing**: `line-height: 1.65`,
@@ -121,7 +122,7 @@ inserts before the run-diff section.
   case name to see its detail (response text, failure reason, trace link,
   inspect command).
 - **Expand all / Collapse all** buttons at the top for power users.
-- The Insights section and Run Differences sections are open by default;
+- The Insights section and Run Info section are open by default;
   everything else starts collapsed.
 
 ### Use native `<details>`/`<summary>` — never CSS `display:none` + JS toggle
