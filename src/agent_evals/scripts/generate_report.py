@@ -227,10 +227,13 @@ def build_comparison(
                 unchanged=unchanged,
             ))
 
-    only_sets = [
-        set(sides[i]) - set.union(*(set(sides[j]) for j in range(n) if j != i))
-        for i in range(n)
-    ]
+    if n == 1:
+        only_sets = [set()]
+    else:
+        only_sets = [
+            set(sides[i]) - set.union(*(set(sides[j]) for j in range(n) if j != i))
+            for i in range(n)
+        ]
     return rows, suite_summaries, only_sets
 
 
