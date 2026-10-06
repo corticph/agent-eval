@@ -44,6 +44,7 @@ from types import SimpleNamespace
 import dotenv
 
 from .data_source import DataSource, make_source
+from .regression_categories import categorize as _categorize
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 dotenv.load_dotenv(_REPO_ROOT / ".env")
@@ -114,62 +115,6 @@ def _is_infra_failure(reason: str) -> bool:
     """True when the failure reason indicates an infrastructure issue, not a quality issue."""
     r = reason or ""
     return any(pat in r for pat in _INFRA_FAILURE_PATTERNS)
-
-
-# --- categorize regressions --------------------------------------------------
-
-def _categorize(reason: str) -> tuple[str, str, str, str]:
-    """Categorize a regression by root cause pattern from the failure reason.
-
-    Returns (key, title, color, description).
-    """
-    r_lower = (reason or "").lower()
-    if "502" in r_lower or "http 502" in r_lower:
-        return ("infra-502", "Infrastructure: HTTP 502", "amber",
-                "The agent API returned 502 Bad Gateway during the eval run. "
-                "These are transient infrastructure failures, not agent bugs. The cases "
-                "scored 0.0 because the agent never responded.")
-    if "timed out" in r_lower and "request" in r_lower:
-        return ("infra-timeout", "Infrastructure: Request timeout (connection failure)", "amber",
-                "The request to the agent API timed out or the connection failed. "
-                "These are transient infrastructure failures, not agent bugs.")
-    if "connection failed" in r_lower or "could not reach" in r_lower:
-        return ("infra-timeout", "Infrastructure: Request timeout (connection failure)", "amber",
-                "The request to the agent API timed out or the connection failed. "
-                "These are transient infrastructure failures, not agent bugs.")
-    if "duration" in r_lower and "exceeded" in r_lower:
-        return ("timeout", "Performance: Eval timeout (max_duration_seconds exceeded)", "amber",
-                "The agent is slower, exceeding max_duration_seconds. "
-                "The answers are often correct \u2014 only the timeout check fails.")
-    if "input-required" in r_lower and "completed" in r_lower:
-        return ("premature-completion", "Agent bug: Premature task completion", "red",
-                "The agent completed the task instead of staying in input-required state. "
-                "This may indicate a change in the orchestrator's completion signalling.")
-    if "forbidden phrase" in r_lower:
-        return ("citation-leak", "Agent bug: Citation markers leaking as forbidden phrases", "red",
-                "Internal citation markers appear in the agent's output and match the "
-                "eval's forbidden-phrase checks.")
-    if "no data parts" in r_lower:
-        return ("no-data-parts", "Agent bug: Response missing data parts", "red",
-                "The agent's response has no data parts to evaluate. The response may "
-                "be text-only where structured data parts were expected.")
-    if "429" in r_lower:
-        return ("rate-limited", "External: API rate-limiting (429)", "amber",
-                "An external API returned HTTP 429 (rate limited). The agent gave up "
-                "instead of using the results it already had.")
-    if "fabricated" in r_lower or "not present in retrieved sources" in r_lower:
-        return ("fabrication", "Agent bug: Fabricated citations", "red",
-                "The agent cites sources not present in the retrieved results.")
-    if "judge returned empty" in r_lower:
-        return ("judge-empty", "Eval infra: Judge returned empty content", "amber",
-                "The LLM judge returned empty content after 3 attempts. This is a judge "
-                "infrastructure issue, not an agent bug or eval correctness issue.")
-    if "missing required phrase" in r_lower or "no match for required pattern" in r_lower:
-        return ("clinical-content", "Agent bug: Missing expected content", "red",
-                "The agent's response is missing key terms that the eval expects. "
-                "This could be a real content regression or an eval brittleness issue.")
-    return ("other", "Other regressions", "amber",
-            "Regressions that don't fit the main patterns. Inspect individually.")
 
 
 # --- build comparison data ---------------------------------------------------
@@ -521,6 +466,8 @@ a[href^="#"]:hover { text-decoration: underline; }
 .tab-bar label:hover { color: var(--text); }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
+.rca-panel { display: none; }
+.rca-panel.active { display: block; }
 .sortable { cursor: pointer; user-select: none; }
 .sortable:hover { color: var(--text); }
 .sortable::after { content: ""; font-size: 0.75rem; margin-left: 0.2rem; opacity: 0.4; }
@@ -615,6 +562,18 @@ function applySort() {
 }
 (function() { sortSuites(0); })();
 
+function switchRcaTab(idx) {
+  document.querySelectorAll(".rca-panel").forEach(function(p) { p.classList.remove("active"); });
+  document.querySelectorAll('input[name="rca-tabs"]').forEach(function(l) { l.checked = false; });
+  document.querySelectorAll('.rca-tab-label').forEach(function(l) { l.style.color = ""; l.style.fontWeight = ""; });
+  var panel = document.getElementById("rca-panel-" + idx);
+  if (panel) panel.classList.add("active");
+  var radio = document.getElementById("rca-rt-" + idx);
+  if (radio) radio.checked = true;
+  var label = document.querySelector('label[for="rca-rt-' + idx + '"]');
+  if (label) { label.style.color = "var(--text)"; label.style.fontWeight = "700"; }
+}
+
 function openAnchorTarget(id) {
   var el = document.getElementById(id);
   if (!el) return false;
@@ -628,6 +587,11 @@ function openAnchorTarget(id) {
   if (panel) {
     var tabName = panel.id.replace("tab-", "");
     switchTab(tabName);
+  }
+  var rcaPanel = el.closest(".rca-panel");
+  if (rcaPanel) {
+    var rcaIdx = rcaPanel.id.replace("rca-panel-", "");
+    switchRcaTab(rcaIdx);
   }
   el.scrollIntoView({behavior: "smooth", block: "start"});
   return true;
@@ -992,35 +956,65 @@ def generate_report_html(
     parts.append(_rankings_table(overall_means, f_total_credits, f_total_durations, f_support, total))
     parts.append('</div>')
 
-    # --- Root Cause Analysis ---
-    regression_rows = [r for r in rows if _is_regression(r, bl)]
-    categories: dict[str, tuple] = {}
-    for r in regression_rows:
-        reason = _worst_run_reason(r, bl)
-        cat_key, cat_title, cat_color, cat_desc = _categorize(reason)
-        if cat_key not in categories:
-            categories[cat_key] = (cat_title, cat_color, cat_desc, [])
-        categories[cat_key][3].append(r)
-
-    sorted_cats = sorted(categories.items(), key=lambda x: -len(x[1][3]))
+    # --- Root Cause Analysis (per non-baseline run) ---
+    non_bl_indices = [i for i in range(n) if i != bl]
 
     parts.append('<h2 id="root-cause-analysis">Root Cause Analysis</h2>')
-    parts.append(f'<p class="meta">{len(regression_rows)} regressed cases grouped by pattern:</p>')
 
-    for cat_key, (cat_title, cat_color, cat_desc, cat_rows) in sorted_cats:
-        if not cat_rows:
-            continue
-        cat_id = f"rca-{cat_key}"
-        parts.append(f'<details class="root-cause" id="{cat_id}">')
-        parts.append(f'<summary><span class="badge {cat_color}">{len(cat_rows)}</span> {cat_title}</summary>')
-        parts.append(f'<div class="callout {cat_color}">{cat_desc}</div>')
+    # Build per-run regression data
+    rca_data: list[tuple[int, list[tuple]]] = []  # (run_idx, sorted_categories)
+    total_regressions = 0
+    for i in non_bl_indices:
+        run_reg_rows = [
+            r for r in rows
+            if r.vals[i] is not None and r.vals[bl] is not None
+            and r.vals[i] < r.vals[bl] - 0.001
+        ]
+        total_regressions += len(run_reg_rows)
+        cats: dict[str, tuple] = {}
+        for r in run_reg_rows:
+            reason = r.reasons[i]
+            cat_key, cat_title, cat_color, cat_desc = _categorize(reason)
+            if cat_key not in cats:
+                cats[cat_key] = (cat_title, cat_color, cat_desc, [])
+            cats[cat_key][3].append(r)
+        sorted_cats_i = sorted(cats.items(), key=lambda x: -len(x[1][3]))
+        rca_data.append((i, sorted_cats_i))
 
-        for r in sorted(cat_rows, key=lambda r: _worst_delta(r, bl) or 0):
-            case_id = f"case-{cat_key}-{_slug(r.case_name)}"
-            wd = _worst_delta(r, bl)
-            _render_case_card(parts, r, labels, bl, case_id, badge_delta=wd, suite_name=r.exp_name)
+    # Tab bar (only if 2+ non-baseline runs)
+    if len(non_bl_indices) > 1:
+        parts.append('<div class="tab-bar">')
+        for idx, i in enumerate(non_bl_indices):
+            reg_count = sum(len(c[1][3]) for c in rca_data[idx][1])
+            is_first = idx == 0
+            parts.append(f'<input type="radio" name="rca-tabs" id="rca-rt-{i}"'
+                         f'{" checked" if is_first else ""} onchange="switchRcaTab({i})"/>')
+            parts.append(f'<label for="rca-rt-{i}" class="rca-tab-label">'
+                         f'{_esc(labels[i])} ({reg_count} regressed)</label>')
+        parts.append('</div>')
 
-        parts.append('</details>')
+    # Per-run panels
+    for idx, (i, sorted_cats_i) in enumerate(rca_data):
+        reg_count = sum(len(c[1][3]) for c in sorted_cats_i)
+        active = " active" if (len(non_bl_indices) == 1 or idx == 0) else ""
+        parts.append(f'<div class="rca-panel{active}" id="rca-panel-{i}">')
+        parts.append(f'<p class="meta">{reg_count} regressed cases for {_esc(labels[i])} vs {_esc(labels[bl])}, grouped by pattern:</p>')
+
+        for cat_key, (cat_title, cat_color, cat_desc, cat_rows) in sorted_cats_i:
+            if not cat_rows:
+                continue
+            cat_id = f"rca-{i}-{cat_key}"
+            parts.append(f'<details class="root-cause" id="{cat_id}">')
+            parts.append(f'<summary><span class="badge {cat_color}">{len(cat_rows)}</span> {cat_title}</summary>')
+            parts.append(f'<div class="callout {cat_color}">{cat_desc}</div>')
+
+            for r in sorted(cat_rows, key=lambda r: (r.vals[i] - r.vals[bl]) if r.vals[i] is not None and r.vals[bl] is not None else 0):
+                case_id = f"case-{i}-{cat_key}-{_slug(r.case_name)}"
+                delta = r.vals[i] - r.vals[bl] if r.vals[i] is not None and r.vals[bl] is not None else None
+                _render_case_card(parts, r, labels, bl, case_id, badge_delta=delta, suite_name=r.exp_name)
+
+            parts.append('</details>')
+        parts.append('</div>')
 
     # --- Improvements ---
     improvement_rows = [r for r in rows if _is_improvement(r, bl)]

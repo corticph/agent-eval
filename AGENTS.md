@@ -508,6 +508,15 @@ every `href="#..."` link resolves to an existing `id`. See
 [`docs/eval-report-style.md`](docs/eval-report-style.md) for the full checklist and
 report structure.
 
+**Regression categorization is data-driven.** The patterns live in
+[`src/agent_evals/scripts/regression_categories.py`](src/agent_evals/scripts/regression_categories.py) —
+a list of dicts with `key`, `title`, `color`, `description`, and match
+conditions (`any` or `all` substrings). When the "Other" bucket exceeds
+~10% of regressions, investigate those cases (fetch traces, inspect
+evals), identify the common failure reason, and append a new dict to
+`CATEGORIES`. Re-run the report generator — the new category appears
+automatically. No code changes to `generate_report.py` needed.
+
 ### Multi-model comparison
 
 For comparing 3+ model runs side by side, run one sweep per model with

@@ -205,8 +205,11 @@ claim** against the data:
    total cases, suites, regressed/improved/unchanged, credits, mean
    scores. Do not round or approximate from memory.
 2. **Categorize all regressions** programmatically — don't leave a large
-   "Other" bucket. If >10% of regressions are "other", the categorization
-   function in `generate_report.py` needs new patterns.
+   "Other" bucket. If >10% of regressions are "other", investigate the
+   uncategorized cases (fetch traces, inspect evals), identify the common
+   failure reason, and append a new dict to `CATEGORIES` in
+   [`regression_categories.py`](../src/agent_evals/scripts/regression_categories.py).
+   Re-run the report generator — the new category appears automatically.
 3. **Verify cost claims**: count infrastructure-failure cases and their
    credits separately.
 4. **Check that insight links resolve**: every `#rca-*`, `#case-*`,
