@@ -473,6 +473,13 @@ uv run python -m agent_evals.scripts.generate_report generate \
     --baseline 0 \
     -o results/multi-model-comparison.html
 
+# For a single-run report (n=1), pass one --tag/--label pair.
+# Root Cause Analysis categorizes errors against a perfect score of 1.0.
+# No Improvements section (no baseline to compare against):
+uv run python -m agent_evals.scripts.generate_report generate \
+    --tag <tag> --label "run name" \
+    -o report.html
+
 # 2. Inspect the report, find element IDs you want to link to
 #    (e.g. #rca-timeout, #case-no-data-parts-my_case, #imp-my_case)
 
