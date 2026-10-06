@@ -850,39 +850,6 @@ def generate_report_html(
                  f"({total} fully scored, {total_cases - total} with infra-failure gaps) \u00b7 "
                  f"Baseline: <code>{_esc(labels[bl])}</code></p>")
 
-    # --- Summary line ---
-    parts.append('<div class="summary-line">')
-    parts.append(f'<span class="num neutral">{overall_means[bl]:.3f}</span> <span class="label">{_esc(labels[bl])}</span>')
-    for i in range(n):
-        if i == bl:
-            continue
-        d = overall_means[i] - overall_means[bl]
-        parts.append(f' \u00b7 <span class="num {_delta_color(d)}">{overall_means[i]:.3f}</span> <span class="label">{_esc(labels[i])}</span> ({_fmt_pp(d)})')
-    parts.append(f' \u00b7 <span class="num red">{regressed_count}</span> <span class="label">regressed</span>')
-    parts.append(f' \u00b7 <span class="num green">{improved_count}</span> <span class="label">improved</span>')
-    parts.append(f' \u00b7 <span class="num neutral">{unchanged_count}</span> <span class="label">unchanged</span>')
-    parts.append('</div>')
-
-    # --- Cost summary ---
-    parts.append('<div class="summary-line" style="margin-top:0.5rem">')
-    parts.append(f'<span class="label">Credits:</span> <span class="num">{total_credits[bl]:.4f}</span> <span class="label">{_esc(labels[bl])}</span>')
-    for i in range(n):
-        if i == bl:
-            continue
-        cd = total_credits[i] - total_credits[bl]
-        parts.append(f' \u00b7 <span class="num">{total_credits[i]:.4f}</span> <span class="label">{_esc(labels[i])}</span> ({cd:+.4f})')
-    parts.append('</div>')
-
-    # --- Time summary ---
-    parts.append('<div class="summary-line" style="margin-top:0.5rem">')
-    parts.append(f'<span class="label">Time:</span> <span class="num">{_fmt_duration(total_durations[bl])}</span> <span class="label">{_esc(labels[bl])}</span>')
-    for i in range(n):
-        if i == bl:
-            continue
-        dd = total_durations[i] - total_durations[bl]
-        parts.append(f' \u00b7 <span class="num">{_fmt_duration(total_durations[i])}</span> <span class="label">{_esc(labels[i])}</span> ({_fmt_duration(abs(dd))})')
-    parts.append('</div>')
-
     # --- Trend bars (one per non-baseline run) ---
     if total > 0:
         for i in range(n):
@@ -1067,7 +1034,7 @@ def generate_report_html(
             parts.append(f'<div class="imp-panel{active}" id="imp-panel-{i}">')
             parts.append(f'<p class="meta">{len(run_imp_rows)} cases improved for {_esc(labels[i])} vs {_esc(labels[bl])}:</p>')
             parts.append('<details class="root-cause" id="all-improvements"><summary><span class="badge green">'
-                         f'{len(run_imp_rows)}</span> All improvements</details>')
+                         f'{len(run_imp_rows)}</span> All improvements</summary>')
             for r in run_imp_rows:
                 imp_id = f"imp-{i}-{_slug(r.case_name)}"
                 delta = r.vals[i] - r.vals[bl]
