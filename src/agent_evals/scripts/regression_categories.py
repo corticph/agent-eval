@@ -91,10 +91,11 @@ CATEGORIES: list[dict] = [
         "title": "Agent bug: Response missing data parts",
         "color": "red",
         "description": (
-            "The agent's response has no data parts to evaluate. The response may "
-            "be text-only where structured data parts were expected."
+            "The agent's response has no data parts to evaluate, or no data part "
+            "matched the expected structure. The response may be text-only where "
+            "structured data parts were expected."
         ),
-        "any": ["no data parts"],
+        "any": ["no data parts", "no data part matched"],
     },
     {
         "key": "rate-limited",
