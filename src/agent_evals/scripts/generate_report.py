@@ -944,106 +944,124 @@ def generate_report_html(
     parts.append(_rankings_table(overall_means, f_total_credits, f_total_durations, f_support, total))
     parts.append('</div>')
 
-    # --- Root Cause Analysis (per non-baseline run) ---
+    # --- Root Cause Analysis (per non-baseline run, or vs perfect score for n=1) ---
     non_bl_indices = [i for i in range(n) if i != bl]
 
     parts.append('<h2 id="root-cause-analysis">Root Cause Analysis</h2>')
 
-    # Build per-run regression data
-    rca_data: list[tuple[int, list[tuple]]] = []  # (run_idx, sorted_categories)
-    total_regressions = 0
-    for i in non_bl_indices:
-        run_reg_rows = [
-            r for r in rows
-            if r.vals[i] is not None and r.vals[bl] is not None
-            and r.vals[i] < r.vals[bl] - 0.001
-        ]
-        total_regressions += len(run_reg_rows)
+    if n == 1:
+        # n=1: categorize errors against a perfect score of 1.0
+        run_reg_rows = [r for r in rows if r.vals[0] is not None and r.vals[0] < 0.999]
         cats: dict[str, tuple] = {}
         for r in run_reg_rows:
-            reason = r.reasons[i]
+            reason = r.reasons[0]
             cat_key, cat_title, cat_color, cat_desc = _categorize(reason)
             if cat_key not in cats:
                 cats[cat_key] = (cat_title, cat_color, cat_desc, [])
             cats[cat_key][3].append(r)
-        sorted_cats_i = sorted(cats.items(), key=lambda x: -len(x[1][3]))
-        rca_data.append((i, sorted_cats_i))
-
-    # Tab bar (only if 2+ non-baseline runs)
-    if len(non_bl_indices) > 1:
-        parts.append('<div class="tab-bar">')
-        for idx, i in enumerate(non_bl_indices):
-            reg_count = sum(len(c[1][3]) for c in rca_data[idx][1])
-            is_first = idx == 0
-            parts.append(f'<input type="radio" name="rca-tabs" id="rca-rt-{i}"'
-                         f'{" checked" if is_first else ""} onchange="switchRcaTab({i})"/>')
-            parts.append(f'<label for="rca-rt-{i}" class="rca-tab-label">'
-                         f'{_esc(labels[i])} ({reg_count} regressed)</label>')
-        parts.append('</div>')
-
-    # Per-run panels
-    for idx, (i, sorted_cats_i) in enumerate(rca_data):
-        reg_count = sum(len(c[1][3]) for c in sorted_cats_i)
-        active = " active" if (len(non_bl_indices) == 1 or idx == 0) else ""
-        parts.append(f'<div class="rca-panel{active}" id="rca-panel-{i}">')
-        parts.append(f'<p class="meta">{reg_count} regressed cases for {_esc(labels[i])} vs {_esc(labels[bl])}, grouped by pattern:</p>')
-
-        for cat_key, (cat_title, cat_color, cat_desc, cat_rows) in sorted_cats_i:
+        sorted_cats_0 = sorted(cats.items(), key=lambda x: -len(x[1][3]))
+        parts.append(f'<p class="meta">{len(run_reg_rows)} cases below perfect score, grouped by pattern:</p>')
+        parts.append('<div class="rca-panel active" id="rca-panel-0">')
+        for cat_key, (cat_title, cat_color, cat_desc, cat_rows) in sorted_cats_0:
             if not cat_rows:
                 continue
-            cat_id = f"rca-{i}-{cat_key}"
+            cat_id = f"rca-0-{cat_key}"
             parts.append(f'<details class="root-cause" id="{cat_id}">')
             parts.append(f'<summary><span class="badge {cat_color}">{len(cat_rows)}</span> {cat_title}</summary>')
             parts.append(f'<div class="callout {cat_color}">{cat_desc}</div>')
-
-            for r in sorted(cat_rows, key=lambda r: (r.vals[i] - r.vals[bl]) if r.vals[i] is not None and r.vals[bl] is not None else 0):
-                case_id = f"case-{i}-{cat_key}-{_slug(r.case_name)}"
-                delta = r.vals[i] - r.vals[bl] if r.vals[i] is not None and r.vals[bl] is not None else None
+            for r in sorted(cat_rows, key=lambda r: r.vals[0] or 0):
+                case_id = f"case-0-{cat_key}-{_slug(r.case_name)}"
+                delta = (r.vals[0] - 1.0) if r.vals[0] is not None else None
                 _render_case_card(parts, r, labels, bl, case_id, badge_delta=delta, suite_name=r.exp_name)
-
             parts.append('</details>')
         parts.append('</div>')
+    else:
+        # n>=2: per-run RCA tabs
+        rca_data: list[tuple[int, list[tuple]]] = []
+        for i in non_bl_indices:
+            run_reg_rows = [
+                r for r in rows
+                if r.vals[i] is not None and r.vals[bl] is not None
+                and r.vals[i] < r.vals[bl] - 0.001
+            ]
+            cats: dict[str, tuple] = {}
+            for r in run_reg_rows:
+                reason = r.reasons[i]
+                cat_key, cat_title, cat_color, cat_desc = _categorize(reason)
+                if cat_key not in cats:
+                    cats[cat_key] = (cat_title, cat_color, cat_desc, [])
+                cats[cat_key][3].append(r)
+            sorted_cats_i = sorted(cats.items(), key=lambda x: -len(x[1][3]))
+            rca_data.append((i, sorted_cats_i))
 
-    # --- Improvements (per non-baseline run) ---
-    parts.append('<h2 id="improvements">Improvements</h2>')
-
-    # Build per-run improvement data
-    imp_data: list[tuple[int, list[SimpleNamespace]]] = []
-    for i in non_bl_indices:
-        run_imp_rows = [
-            r for r in rows
-            if r.vals[i] is not None and r.vals[bl] is not None
-            and r.vals[i] > r.vals[bl] + 0.001
-        ]
-        run_imp_rows.sort(key=lambda r: r.vals[i] - r.vals[bl], reverse=True)
-        imp_data.append((i, run_imp_rows))
-
-    has_improvements = any(len(rows_i) > 0 for _, rows_i in imp_data)
-    if has_improvements:
-        # Tab bar (only if 2+ non-baseline runs)
         if len(non_bl_indices) > 1:
             parts.append('<div class="tab-bar">')
             for idx, i in enumerate(non_bl_indices):
-                imp_count = len(imp_data[idx][1])
+                reg_count = sum(len(c[1][3]) for c in rca_data[idx][1])
                 is_first = idx == 0
-                parts.append(f'<input type="radio" name="imp-tabs" id="imp-rt-{i}"'
-                             f'{" checked" if is_first else ""} onchange="switchImpTab({i})"/>')
-                parts.append(f'<label for="imp-rt-{i}" class="imp-tab-label">'
-                             f'{_esc(labels[i])} ({imp_count} improved)</label>')
+                parts.append(f'<input type="radio" name="rca-tabs" id="rca-rt-{i}"'
+                             f'{" checked" if is_first else ""} onchange="switchRcaTab({i})"/>')
+                parts.append(f'<label for="rca-rt-{i}" class="rca-tab-label">'
+                             f'{_esc(labels[i])} ({reg_count} regressed)</label>')
             parts.append('</div>')
 
-        for idx, (i, run_imp_rows) in enumerate(imp_data):
+        for idx, (i, sorted_cats_i) in enumerate(rca_data):
+            reg_count = sum(len(c[1][3]) for c in sorted_cats_i)
             active = " active" if (len(non_bl_indices) == 1 or idx == 0) else ""
-            parts.append(f'<div class="imp-panel{active}" id="imp-panel-{i}">')
-            parts.append(f'<p class="meta">{len(run_imp_rows)} cases improved for {_esc(labels[i])} vs {_esc(labels[bl])}:</p>')
-            parts.append('<details class="root-cause" id="all-improvements"><summary><span class="badge green">'
-                         f'{len(run_imp_rows)}</span> All improvements</summary>')
-            for r in run_imp_rows:
-                imp_id = f"imp-{i}-{_slug(r.case_name)}"
-                delta = r.vals[i] - r.vals[bl]
-                _render_case_card(parts, r, labels, bl, imp_id, badge_delta=delta, suite_name=r.exp_name)
-            parts.append('</details>')
+            parts.append(f'<div class="rca-panel{active}" id="rca-panel-{i}">')
+            parts.append(f'<p class="meta">{reg_count} regressed cases for {_esc(labels[i])} vs {_esc(labels[bl])}, grouped by pattern:</p>')
+            for cat_key, (cat_title, cat_color, cat_desc, cat_rows) in sorted_cats_i:
+                if not cat_rows:
+                    continue
+                cat_id = f"rca-{i}-{cat_key}"
+                parts.append(f'<details class="root-cause" id="{cat_id}">')
+                parts.append(f'<summary><span class="badge {cat_color}">{len(cat_rows)}</span> {cat_title}</summary>')
+                parts.append(f'<div class="callout {cat_color}">{cat_desc}</div>')
+                for r in sorted(cat_rows, key=lambda r: (r.vals[i] - r.vals[bl]) if r.vals[i] is not None and r.vals[bl] is not None else 0):
+                    case_id = f"case-{i}-{cat_key}-{_slug(r.case_name)}"
+                    delta = r.vals[i] - r.vals[bl] if r.vals[i] is not None and r.vals[bl] is not None else None
+                    _render_case_card(parts, r, labels, bl, case_id, badge_delta=delta, suite_name=r.exp_name)
+                parts.append('</details>')
             parts.append('</div>')
+
+    # --- Improvements (per non-baseline run, skip for n=1) ---
+    if n > 1:
+        parts.append('<h2 id="improvements">Improvements</h2>')
+        imp_data: list[tuple[int, list[SimpleNamespace]]] = []
+        for i in non_bl_indices:
+            run_imp_rows = [
+                r for r in rows
+                if r.vals[i] is not None and r.vals[bl] is not None
+                and r.vals[i] > r.vals[bl] + 0.001
+            ]
+            run_imp_rows.sort(key=lambda r: r.vals[i] - r.vals[bl], reverse=True)
+            imp_data.append((i, run_imp_rows))
+
+        has_improvements = any(len(rows_i) > 0 for _, rows_i in imp_data)
+        if has_improvements:
+            if len(non_bl_indices) > 1:
+                parts.append('<div class="tab-bar">')
+                for idx, i in enumerate(non_bl_indices):
+                    imp_count = len(imp_data[idx][1])
+                    is_first = idx == 0
+                    parts.append(f'<input type="radio" name="imp-tabs" id="imp-rt-{i}"'
+                                 f'{" checked" if is_first else ""} onchange="switchImpTab({i})"/>')
+                    parts.append(f'<label for="imp-rt-{i}" class="imp-tab-label">'
+                                 f'{_esc(labels[i])} ({imp_count} improved)</label>')
+                parts.append('</div>')
+
+            for idx, (i, run_imp_rows) in enumerate(imp_data):
+                active = " active" if (len(non_bl_indices) == 1 or idx == 0) else ""
+                parts.append(f'<div class="imp-panel{active}" id="imp-panel-{i}">')
+                parts.append(f'<p class="meta">{len(run_imp_rows)} cases improved for {_esc(labels[i])} vs {_esc(labels[bl])}:</p>')
+                parts.append('<details class="root-cause" id="all-improvements"><summary><span class="badge green">'
+                             f'{len(run_imp_rows)}</span> All improvements</summary>')
+                for r in run_imp_rows:
+                    imp_id = f"imp-{i}-{_slug(r.case_name)}"
+                    delta = r.vals[i] - r.vals[bl]
+                    _render_case_card(parts, r, labels, bl, imp_id, badge_delta=delta, suite_name=r.exp_name)
+                parts.append('</details>')
+                parts.append('</div>')
 
     # --- Tabbed section: Suite Deltas | Credits | Time | Case-by-Case ---
     parts.append('<h2 id="suite-breakdown">Suite Breakdown</h2>')
