@@ -72,7 +72,7 @@ def test_per_eval_timeout_parsed_on_sequential_case(tmp_path: Path) -> None:
 evals:
   - name: case1
     type: sequential
-    timeout_seconds: 152.5
+    timeout_seconds: 200.5
     steps:
       - name: step1
         message:
@@ -83,7 +83,7 @@ evals:
 """,
     )
     suite = load_suite(suite_path)
-    assert suite.cases[0].timeout_seconds == 152.5
+    assert suite.cases[0].timeout_seconds == 200.5
 
 
 def test_globals_timeout_used_as_fallback(tmp_path: Path) -> None:

@@ -28,12 +28,14 @@ INTERNAL_ENV_VARS: dict[str, str] = {
 
 # Every environment's Opik host + project, keyed by env name.
 OPIK_HOSTS: dict[str, str] = {
+    "local": "http://localhost:18080",
     "dev-weu": "https://opik.dev-weu.test",
     "staging-eu": "https://opik.staging-eu.test",
     "eu": "https://opik.eu.test",
     "us": "https://opik.us.test",
 }
 OPIK_PROJECT_IDS: dict[str, str] = {
+    "local": "proj-local",
     "dev-weu": "proj-dev-weu",
     "staging-eu": "proj-staging-eu",
     "eu": "proj-eu",

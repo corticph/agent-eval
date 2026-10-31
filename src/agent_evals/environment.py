@@ -109,6 +109,8 @@ _ENVIRONMENT_SPECS: dict[str, _Spec] = {
         api_url="http://localhost:8080",
         api_url_var="AGENT_API_URL_LOCAL",
         token_var="AGENT_API_TOKEN_LOCAL",
+        opik_url_var="OPIK_URL_LOCAL",
+        opik_project_id_var="OPIK_PROJECT_ID_LOCAL",
     ),
     "dev-weu": _Spec(
         api_url_var="AGENT_API_URL_DEV_WEU",
@@ -382,7 +384,7 @@ class Environment:
         — the one "which Opik" override, shared with sink writes — replaces
         the environment's Opik host so links point where traces actually
         went. It cannot conjure links for an environment with no trace
-        project (local, or an external checkout).
+        project (an external checkout that doesn't set the env vars).
         """
         row = self._row
         opik_url = os.environ.get(OPIK_URL_OVERRIDE_VAR) or row.opik_url
@@ -424,6 +426,14 @@ class Environment:
             token = self._request_oauth_token()
         self._token = token
         return token
+
+    def invalidate_token(self) -> None:
+        """Clear the cached token so the next ``resolve_token`` re-fetches.
+
+        Called by ``AgentClient`` after a 401 to refresh an expired OAuth
+        token mid-sweep without restarting the run.
+        """
+        self._token = None
 
     def _request_oauth_token(self) -> str:
         row = self._row
